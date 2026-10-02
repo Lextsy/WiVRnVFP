@@ -402,104 +402,233 @@ void decoder::create_sampler(const AHardwareBuffer_Desc & buffer_desc, vk::Andro
 
 std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AImage * image)
 {
-	AHardwareBuffer * hardware_buffer;
-	check(AImage_getHardwareBuffer(image, &hardware_buffer), "AImage_getHardwareBuffer");
-
 	std::unique_lock lock(hbm_mutex);
 
-	AHardwareBuffer_Desc buffer_desc{};
-	AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
-	auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
-
-	if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
+	if (api_level >= 26)
 	{
-		memcpy(&ahb_format, &format_properties, sizeof(format_properties));
-		spdlog::info("decoded image size: {}x{}", buffer_desc.width, buffer_desc.height);
-		create_sampler(buffer_desc, ahb_format);
-		hardware_buffer_map.clear();
-		// TODO tell the reprojector to recreate the pipeline
+		// API 26+: Use AImage_getHardwareBuffer
+		AHardwareBuffer * hardware_buffer;
+		check(AImage_getHardwareBuffer(image, &hardware_buffer), "AImage_getHardwareBuffer");
+
+		AHardwareBuffer_Desc buffer_desc{};
+		AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+
+		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
+
+		if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
+		{
+			memcpy(&ahb_format, &format_properties, sizeof(format_properties));
+			spdlog::info("decoded image size: {}x{}", buffer_desc.width, buffer_desc.height);
+			create_sampler(buffer_desc, ahb_format);
+			hardware_buffer_map.clear();
+		}
+
+		auto it = hardware_buffer_map.find(hardware_buffer);
+		if (it != hardware_buffer_map.end())
+			return it->second;
+
+		vk::StructureChain img_info{
+		        vk::ImageCreateInfo{
+		                .flags = {},
+		                .imageType = vk::ImageType::e2D,
+		                .format = vk::Format::eUndefined,
+		                .extent = {buffer_desc.width, buffer_desc.height, 1},
+		                .mipLevels = 1,
+		                .arrayLayers = 1,
+		                .samples = vk::SampleCountFlagBits::e1,
+		                .tiling = vk::ImageTiling::eOptimal,
+		                .usage = vk::ImageUsageFlagBits::eSampled,
+		                .sharingMode = vk::SharingMode::eExclusive,
+		                .initialLayout = vk::ImageLayout::eUndefined,
+		        },
+		        vk::ExternalMemoryImageCreateInfo{
+		                .handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eAndroidHardwareBufferANDROID,
+		        },
+		        vk::ExternalFormatANDROID{
+		                .externalFormat = format_properties.externalFormat,
+		        },
+		};
+
+		vk::raii::Image vimage(device, img_info.get());
+
+		assert(properties.memoryTypeBits != 0);
+		vk::StructureChain mem_info{
+		        vk::MemoryAllocateInfo{
+		                .allocationSize = properties.allocationSize,
+		                .memoryTypeIndex = (uint32_t)(ffs(properties.memoryTypeBits) - 1),
+		        },
+		        vk::MemoryDedicatedAllocateInfo{
+		                .image = *vimage,
+		        },
+		        vk::ImportAndroidHardwareBufferInfoANDROID{
+		                .buffer = hardware_buffer,
+		        },
+		};
+
+		vk::raii::DeviceMemory memory(device, mem_info.get());
+
+		vimage.bindMemory(*memory, 0);
+
+		vk::StructureChain iv_info{
+		        vk::ImageViewCreateInfo{
+		                .image = *vimage,
+		                .viewType = vk::ImageViewType::e2D,
+		                .format = vk::Format::eUndefined,
+		                .subresourceRange = {
+		                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                        .baseMipLevel = 0,
+		                        .levelCount = 1,
+		                        .baseArrayLayer = 0,
+		                        .layerCount = 1,
+		                },
+		        },
+		        vk::SamplerYcbcrConversionInfo{
+		                .conversion = *ycbcr_conversion,
+		        },
+		};
+
+		application::ignore_debug_reports_for(*vimage);
+		vk::raii::ImageView image_view(device, iv_info.get());
+		application::unignore_debug_reports_for(*vimage);
+
+		auto handle = std::make_shared<mapped_hardware_buffer>();
+		handle->vimage = std::move(vimage);
+		handle->image_view = std::move(image_view);
+		handle->memory = std::move(memory);
+		handle->extent = vk::Extent2D{
+		        .width = buffer_desc.width,
+		        .height = buffer_desc.height,
+		};
+
+		hardware_buffer_map[hardware_buffer] = handle;
+		return handle;
 	}
+	else
+	{
+		// API 25: Use AImage_getPlanes with manual buffer upload
+		AImage_Format format = AImage_getFormat(image);
+		uint32_t width = AImage_getWidth(image);
+		uint32_t height = AImage_getHeight(image);
 
-	auto it = hardware_buffer_map.find(hardware_buffer);
-	if (it != hardware_buffer_map.end())
-		return it->second;
+		vk::Format vk_format = vk::Format::eR8G8B8A8_UNORM;
+		if (format == AIMAGE_FORMAT_YV12 || format == AIMAGE_FORMAT_NV21)
+			vk_format = vk::Format::eBGRX8888_UNORM;
 
-	vk::StructureChain img_info{
-	        vk::ImageCreateInfo{
-	                .flags = {},
-	                .imageType = vk::ImageType::e2D,
-	                .format = vk::Format::eUndefined,
-	                .extent = {buffer_desc.width, buffer_desc.height, 1},
-	                .mipLevels = 1,
-	                .arrayLayers = 1,
-	                .samples = vk::SampleCountFlagBits::e1,
-	                .tiling = vk::ImageTiling::eOptimal,
-	                .usage = vk::ImageUsageFlagBits::eSampled,
-	                .sharingMode = vk::SharingMode::eExclusive,
-	                .initialLayout = vk::ImageLayout::eUndefined,
-	        },
-	        vk::ExternalMemoryImageCreateInfo{
-	                .handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eAndroidHardwareBufferANDROID,
-	        },
-	        vk::ExternalFormatANDROID{
-	                .externalFormat = format_properties.externalFormat,
-	        },
-	};
+		vk::ImageCreateInfo img_info{
+		        .flags = {},
+		        .imageType = vk::ImageType::e2D,
+		        .format = vk_format,
+		        .extent = {width, height, 1},
+		        .mipLevels = 1,
+		        .arrayLayers = 1,
+		        .samples = vk::SampleCountFlagBits::e1,
+		        .tiling = vk::ImageTiling::eLinear,
+		        .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+		        .sharingMode = vk::SharingMode::eExclusive,
+		        .initialLayout = vk::ImageLayout::eUndefined,
+		};
 
-	vk::raii::Image vimage(device, img_info.get());
+		vk::raii::Image vimage(device, img_info);
 
-	assert(properties.memoryTypeBits != 0);
-	vk::StructureChain mem_info{
-	        vk::MemoryAllocateInfo{
-	                .allocationSize = properties.allocationSize,
-	                .memoryTypeIndex = (uint32_t)(ffs(properties.memoryTypeBits) - 1),
-	        },
-	        vk::MemoryDedicatedAllocateInfo{
-	                .image = *vimage,
-	        },
-	        vk::ImportAndroidHardwareBufferInfoANDROID{
-	                .buffer = hardware_buffer,
-	        },
-	};
+		vk::MemoryRequirements mem_reqs = device.getImageMemoryRequirements(*vimage);
+		vk::MemoryAllocateInfo mem_info{
+		        .allocationSize = mem_reqs.size,
+		        .memoryTypeIndex = (uint32_t)(ffs(mem_reqs.memoryTypeBits) - 1),
+		};
 
-	vk::raii::DeviceMemory memory(device, mem_info.get());
+		vk::raii::DeviceMemory memory(device, mem_info);
+		vimage.bindMemory(*memory, 0);
 
-	vimage.bindMemory(*memory, 0);
+		// Convert from AImage planes to Vulkan image
+		uint8_t * dst = static_cast<uint8_t *>(device.mapMemory(*memory, 0, mem_reqs.size, vk::MemoryMapFlags{}));
 
-	vk::StructureChain iv_info{
-	        vk::ImageViewCreateInfo{
-	                .image = *vimage,
-	                .viewType = vk::ImageViewType::e2D,
-	                .format = vk::Format::eUndefined,
-	                .subresourceRange = {
-	                        .aspectMask = vk::ImageAspectFlagBits::eColor,
-	                        .baseMipLevel = 0,
-	                        .levelCount = 1,
-	                        .baseArrayLayer = 0,
-	                        .layerCount = 1,
-	                },
-	        },
-	        vk::SamplerYcbcrConversionInfo{
-	                .conversion = *ycbcr_conversion,
-	        },
-	};
+		switch (format)
+		{
+			case AIMAGE_FORMAT_YV12:
+			case AIMAGE_FORMAT_NV21:
+			{
+				// YUV420 planar
+				AImage_Plane * y_plane;
+				check(AImage_getPlane(image, 0, &y_plane), "AImage_getPlane(0)");
 
-	application::ignore_debug_reports_for(*vimage);
-	vk::raii::ImageView image_view(device, iv_info.get());
-	application::unignore_debug_reports_for(*vimage);
+				AImage_Plane * u_plane;
+				check(AImage_getPlane(image, 1, &u_plane), "AImage_getPlane(1)");
 
-	auto handle = std::make_shared<mapped_hardware_buffer>();
-	handle->vimage = std::move(vimage);
-	handle->image_view = std::move(image_view);
-	handle->memory = std::move(memory);
-	handle->extent = vk::Extent2D{
-	        .width = buffer_desc.width,
-	        .height = buffer_desc.height,
-	};
+				AImage_Plane * v_plane;
+				check(AImage_getPlane(image, 2, &v_plane), "AImage_getPlane(2)");
 
-	hardware_buffer_map[hardware_buffer] = handle;
-	return handle;
+				const uint8_t * y_data = AImage_getPlaneData(y_plane);
+				const uint8_t * u_data = AImage_getPlaneData(u_plane);
+				const uint8_t * v_data = AImage_getPlaneData(v_plane);
+
+				// Simple YUV to RGB conversion (could be optimized)
+				for (uint32_t y = 0; y < height; y++)
+				{
+					for (uint32_t x = 0; x < width; x++)
+					{
+						int Y = y_data[y * AImage_getPlaneRowStride(y_plane) + x];
+						int U = u_data[(y >> 1) * AImage_getPlaneRowStride(u_plane) + (x >> 1)];
+						int V = v_data[(y >> 1) * AImage_getPlaneRowStride(v_plane) + (x >> 1)];
+
+						// BT.601 conversion
+						int R = Y + 1.402f * (V - 128);
+						int G = Y - 0.344f * (U - 128) - 0.714f * (V - 128);
+						int B = Y + 1.772f * (U - 128);
+
+						dst[(y * width + x) * 4 + 0] = std::clamp(B, 0, 255);
+						dst[(y * width + x) * 4 + 1] = std::clamp(G, 0, 255);
+						dst[(y * width + x) * 4 + 2] = std::clamp(R, 0, 255);
+						dst[(y * width + x) * 4 + 3] = 255;
+					}
+				}
+				break;
+			}
+			default:
+			{
+				// RGBA
+				AImage_Plane * plane;
+				check(AImage_getPlane(image, 0, &plane), "AImage_getPlane(0)");
+
+				const uint8_t * src = AImage_getPlaneData(plane);
+				int row_stride = AImage_getPlaneRowStride(plane);
+
+				for (uint32_t y = 0; y < height; y++)
+				{
+					memcpy(dst + y * width * 4, src + y * row_stride, width * 4);
+				}
+				break;
+			}
+		}
+
+		device.unmapMemory(*memory);
+
+		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
+		        .image = *vimage,
+		        .viewType = vk::ImageViewType::e2D,
+		        .format = vk_format,
+		        .components = {vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eG, vk::ComponentSwizzle::eB, vk::ComponentSwizzle::eA},
+		        .subresourceRange = {
+		                .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                .baseMipLevel = 0,
+		                .levelCount = 1,
+		                .baseArrayLayer = 0,
+		                .layerCount = 1,
+		        },
+		});
+
+		auto handle = std::make_shared<mapped_hardware_buffer>();
+		handle->vimage = std::move(vimage);
+		handle->image_view = std::move(image_view);
+		handle->memory = std::move(memory);
+		handle->extent = vk::Extent2D{
+		        .width = width,
+		        .height = height,
+		};
+
+		return handle;
+	}
 }
 
 void decoder::on_media_error(AMediaCodec *, void * userdata, media_status_t error, int32_t actionCode, const char * detail)

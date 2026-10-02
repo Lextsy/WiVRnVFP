@@ -104,9 +104,10 @@ android {
 
     defaultConfig {
         applicationId "org.meumeu.wivrn"
-        // for Vulkan, need at least 24
-        // for AImage_getHardwareBuffer, API 26
-        minSdkVersion 29
+        // Vive Focus Plus runs Android 7.1.2 (API 25)
+        // Hardware buffer APIs (AImage_getHardwareBuffer, android/font.h) require API 26
+        // We use runtime checks to provide fallback code paths for API 25
+        minSdkVersion 25
         compileSdkVersion 34
         targetSdkVersion 32 // for Oculus Store
 

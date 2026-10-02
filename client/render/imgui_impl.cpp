@@ -408,33 +408,50 @@ imgui_context::imgui_context(
 #ifdef __ANDROID__
 static std::vector<std::string> find_font(std::u16string_view sample_text, const std::string & locale)
 {
-	AFontMatcher * font_matcher = AFontMatcher_create();
-	if (!font_matcher)
-		throw std::runtime_error("AFontMatcher_create");
+	jni::jni_thread::setup_thread(nullptr);
 
-	AFontMatcher_setFamilyVariant(font_matcher, AFAMILY_VARIANT_DEFAULT);
-	AFontMatcher_setLocales(font_matcher, locale.c_str());
-	AFontMatcher_setStyle(font_matcher, AFONT_WEIGHT_NORMAL, false);
+	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
-	std::vector<std::string> fonts;
-
-	while (!sample_text.empty())
+	if (api_level >= 26)
 	{
-		uint32_t runlength = 0;
+		// API 26+: Use AFontMatcher
+		AFontMatcher * font_matcher = AFontMatcher_create();
+		if (!font_matcher)
+			throw std::runtime_error("AFontMatcher_create");
 
-		AFont * font = AFontMatcher_match(font_matcher, "sans-serif", (uint16_t *)sample_text.data(), sample_text.size(), &runlength);
-		fonts.emplace_back(AFont_getFontFilePath(font));
-		AFont_close(font);
+		AFontMatcher_setFamilyVariant(font_matcher, AFAMILY_VARIANT_DEFAULT);
+		AFontMatcher_setLocales(font_matcher, locale.c_str());
+		AFontMatcher_setStyle(font_matcher, AFONT_WEIGHT_NORMAL, false);
 
-		if (runlength == 0)
-			break;
+		std::vector<std::string> fonts;
 
-		sample_text = sample_text.substr(runlength);
+		while (!sample_text.empty())
+		{
+			uint32_t runlength = 0;
+
+			AFont * font = AFontMatcher_match(font_matcher, "sans-serif", (uint16_t *)sample_text.data(), sample_text.size(), &runlength);
+			fonts.emplace_back(AFont_getFontFilePath(font));
+			AFont_close(font);
+
+			if (runlength == 0)
+				break;
+
+			sample_text = sample_text.substr(runlength);
+		}
+
+		AFontMatcher_destroy(font_matcher);
+
+		return fonts;
 	}
-
-	AFontMatcher_destroy(font_matcher);
-
-	return fonts;
+	else
+	{
+		// API 25: Fall back to hard-coded default font paths
+		spdlog::warn("Using default fonts (API 25 does not have AFontMatcher)");
+		return {
+		        "/system/fonts/roboto-regular.ttf",
+		        "/system/fonts/roboto-bold.ttf"
+		};
+	}
 }
 #else
 static std::vector<std::string> find_font(std::u16string sample_text, const std::string & locale)

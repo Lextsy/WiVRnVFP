@@ -84,20 +84,34 @@ text_rasterizer::text_rasterizer(vk::raii::Device & device, vk::raii::PhysicalDe
 
 #ifdef __ANDROID__
 	{
-		std::u16string ws = u"hello";
-		AFontMatcher * font_matcher = AFontMatcher_create();
+		jni::jni_thread::setup_thread(nullptr);
+		int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
-		AFontMatcher_setFamilyVariant(font_matcher, AFAMILY_VARIANT_DEFAULT);
-		AFontMatcher_setLocales(font_matcher, "fr-FR,en-GB");
-		AFontMatcher_setStyle(font_matcher, AFONT_WEIGHT_NORMAL, false);
+		if (api_level >= 26)
+		{
+			// API 26+: Use AFontMatcher
+			std::u16string ws = u"hello";
+			AFontMatcher * font_matcher = AFontMatcher_create();
 
-		AFont * font = AFontMatcher_match(font_matcher, "sans-serif", (uint16_t *)ws.c_str(), ws.size(), nullptr);
+			AFontMatcher_setFamilyVariant(font_matcher, AFAMILY_VARIANT_DEFAULT);
+			AFontMatcher_setLocales(font_matcher, "fr-FR,en-GB");
+			AFontMatcher_setStyle(font_matcher, AFONT_WEIGHT_NORMAL, false);
 
-		font_filename = AFont_getFontFilePath(font);
+			AFont * font = AFontMatcher_match(font_matcher, "sans-serif", (uint16_t *)ws.c_str(), ws.size(), nullptr);
 
-		AFont_close(font);
-		AFontMatcher_destroy(font_matcher);
+			font_filename = AFont_getFontFilePath(font);
+
+			AFont_close(font);
+			AFontMatcher_destroy(font_matcher);
+		}
+		else
+		{
+			// API 25: Fall back to default font path
+			font_filename = "/system/fonts/roboto-regular.ttf";
+			spdlog::warn("Using default font path (API 25 does not have AFontMatcher)");
+		}
 	}
+#endif
 #else
 	font_filename = "/usr/share/fonts/TTF/DejaVuSans.ttf";
 #endif
