@@ -111,7 +111,6 @@ text_rasterizer::text_rasterizer(vk::raii::Device & device, vk::raii::PhysicalDe
 			spdlog::warn("Using default font path (API 25 does not have AFontMatcher)");
 		}
 	}
-#endif
 #else
 	font_filename = "/usr/share/fonts/TTF/DejaVuSans.ttf";
 #endif
