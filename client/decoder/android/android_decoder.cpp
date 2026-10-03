@@ -700,12 +700,10 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 {
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
 	char * name = nullptr;
-	check(AMediaCodec_getName(media_codec, &name), "AMediaCodec_getName");
+	media_status_t get_name_status = AMediaCodec_getName(media_codec, &name);
+	check(get_name_status, "AMediaCodec_getName");
 	auto release = [&]() {
-		media_status_t status = AMediaCodec_releaseName(media_codec, name);
-		if (status != AMEDIA_OK) {
-			spdlog::warn("AMediaCodec_releaseName failed: {}", status);
-		}
+		AMediaCodec_releaseName(media_codec, name);
 	};
 	for (const char * prefix: {
 	             "OMX.google",
