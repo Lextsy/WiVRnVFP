@@ -570,9 +570,15 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 				{
 					for (uint32_t x = 0; x < width; x++)
 					{
-						int Y = y_data[y * AImage_getPlaneRowStride(image, 0) + x];
-						int U = u_data[(y >> 1) * AImage_getPlaneRowStride(image, 1) + (x >> 1)];
-						int V = v_data[(y >> 1) * AImage_getPlaneRowStride(image, 2) + (x >> 1)];
+						int y_row_stride;
+						AImage_getPlaneRowStride(image, 0, &y_row_stride);
+						int Y = y_data[y * y_row_stride + x];
+						int u_row_stride;
+						AImage_getPlaneRowStride(image, 1, &u_row_stride);
+						int U = u_data[(y >> 1) * u_row_stride + (x >> 1)];
+						int v_row_stride;
+						AImage_getPlaneRowStride(image, 2, &v_row_stride);
+						int V = v_data[(y >> 1) * v_row_stride + (x >> 1)];
 
 						// BT.601 conversion
 						int R = Y + 1.402f * (V - 128);
@@ -593,7 +599,8 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 				uint8_t * src = nullptr;
 				int src_length = 0;
 				check(AImage_getPlaneData(image, 0, &src, &src_length), "AImage_getPlaneData(0)");
-				int row_stride = AImage_getPlaneRowStride(image, 0);
+				int row_stride;
+				AImage_getPlaneRowStride(image, 0, &row_stride);
 
 				for (uint32_t y = 0; y < height; y++)
 				{
