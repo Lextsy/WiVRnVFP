@@ -96,7 +96,7 @@ def use_asan = project.hasProperty('wivrn_address_sanitizer') && wivrn_address_s
 
 android {
     namespace = "org.meumeu.wivrn"
-    ndkVersion = "29.0.14206865"
+    ndkVersion = "28.2.13676358"
 
     lint {
         disable += "ExpiredTargetSdkVersion"
