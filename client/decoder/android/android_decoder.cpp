@@ -158,7 +158,7 @@ decoder::decoder(
 	#pragma clang diagnostic push
 	#pragma clang diagnostic ignored "-Wunreachable-code"
 #if __ANDROID_API__ >= 28
-	if (api_level >= 28) {
+	if (true) {
 		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
 		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
 	}
