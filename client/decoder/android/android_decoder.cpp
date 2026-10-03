@@ -414,6 +414,8 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 		AHardwareBuffer_Desc buffer_desc{};
 		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+
+		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 #pragma clang diagnostic pop
 
 		if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
