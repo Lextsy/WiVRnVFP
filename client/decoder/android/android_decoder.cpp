@@ -148,8 +148,9 @@ decoder::decoder(
 		if (not media_codec)
 			throw std::runtime_error(std::string("Cannot create decoder for MIME type ") + mime(description.codec[stream_index]));
 
-		char * codec_name;
-		check(AMediaCodec_getName(media_codec.get(), &codec_name), "AMediaCodec_getName");
+		char * codec_name = nullptr;
+		media_status_t name_status = AMediaCodec_getName(media_codec.get(), &codec_name);
+		check(name_status, "AMediaCodec_getName");
 		spdlog::info("Created MediaCodec decoder \"{}\"", codec_name);
 		AMediaCodec_releaseName(media_codec.get(), codec_name);
 
@@ -163,8 +164,8 @@ decoder::decoder(
 		        .onAsyncFormatChanged = decoder::on_media_format_changed,
 		        .onAsyncError = decoder::on_media_error,
 		};
-		check(AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this),
-		      "AMediaCodec_setAsyncNotifyCallback");
+		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
+		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
 
 		check(AMediaCodec_configure(media_codec.get(), format.get(), window, nullptr /* crypto */, 0 /* flags */),
 		      "AMediaCodec_configure");
@@ -409,6 +410,7 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 	if (api_level >= 26)
 	{
 		// API 26+: Use AImage_getHardwareBuffer
+		AHardwareBuffer * hardware_buffer = nullptr;
 		media_status_t hb_status = AImage_getHardwareBuffer(image, &hardware_buffer);
 		check(hb_status, "AImage_getHardwareBuffer");
 
@@ -615,10 +617,7 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			}
 		}
 
-		VkResult unmap_result = vkUnmapMemory(*device, *memory);
-		if (unmap_result != VK_SUCCESS) {
-			throw std::runtime_error("vkUnmapMemory failed");
-		}
+		vkUnmapMemory(*device, *memory);
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
 		        .image = *vimage,
