@@ -155,10 +155,13 @@ decoder::decoder(
 		        .onAsyncFormatChanged = decoder::on_media_format_changed,
 		        .onAsyncError = decoder::on_media_error,
 		};
-		if (api_level >= 28) {
-			media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
-			check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
-		}
+	#pragma clang diagnostic push
+	#pragma clang diagnostic ignored "-Wunreachable-code"
+	if (api_level >= 28) {
+		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
+		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
+	}
+	#pragma clang diagnostic pop
 
 		check(AMediaCodec_configure(media_codec.get(), format.get(), window, nullptr /* crypto */, 0 /* flags */),
 		      "AMediaCodec_configure");
@@ -400,17 +403,18 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
-	if (api_level >= 26)
+	if (api_level >= 28)
 	{
-		// API 26+: Use AImage_getHardwareBuffer
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunreachable-code"
+		// API 28+: Use AImage_getHardwareBuffer with AHardwareBuffer_describe
 		AHardwareBuffer * hardware_buffer = nullptr;
 		media_status_t hb_status = AImage_getHardwareBuffer(image, &hardware_buffer);
 		check(hb_status, "AImage_getHardwareBuffer");
 
 		AHardwareBuffer_Desc buffer_desc{};
 		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
-
-		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
+#pragma clang diagnostic pop
 
 		if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
 		{
@@ -688,6 +692,8 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
 	char * name = nullptr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunreachable-code"
 	if (api_level >= 28) {
 		media_status_t name_status = AMediaCodec_getName(media_codec, &name);
 		check(name_status, "AMediaCodec_getName");
@@ -696,6 +702,7 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 		if (api_level >= 28)
 			AMediaCodec_releaseName(media_codec, name);
 	};
+#pragma clang diagnostic pop
 	for (const char * prefix: {
 	             "OMX.google",
 	             "c2.android",

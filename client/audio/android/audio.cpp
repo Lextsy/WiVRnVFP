@@ -17,8 +17,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunreachable-code"
 #include "audio.h"
-
+#pragma clang diagnostic pop
 #include "application.h"
 #include "utils/named_thread.h"
 #include "wivrn_client.h"
