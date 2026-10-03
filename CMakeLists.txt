@@ -192,7 +192,9 @@ endif()
 
 if (WIVRN_BUILD_CLIENT)
     find_program(RSVG_CONVERT rsvg-convert REQUIRED)
-    find_program(KTX ktx REQUIRED)
+    if(NOT ANDROID)
+        find_program(KTX ktx REQUIRED)
+    endif()
 
     if (WIVRN_COMPRESS_GLB)
         find_program(GLTF_TRANSFORM gltf-transform REQUIRED)
@@ -221,8 +223,6 @@ endif()
 if(ANDROID)
     set(ANDROID_NDK $ENV{ANDROID_NDK_ROOT})
     set(CMAKE_ANDROID_NDK $ENV{ANDROID_NDK_ROOT})
-    include(AndroidNdkModules)
-    android_ndk_import_module_native_app_glue()
 
     # Runtime API level checks are used instead of compile-time guards
     # to support both API 25 (Vive Focus Plus) and API 26+ (Oculus Quest)

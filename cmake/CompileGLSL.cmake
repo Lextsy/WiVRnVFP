@@ -21,7 +21,11 @@ function(compile_glsl_aux shader_stage shader_name glsl_filename output target_e
 
     add_custom_command(
         OUTPUT "${SPV_FILE}-nopt"
+    if(ANDROID)
+        COMMAND ${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/glslangValidator -V --target-env ${target_env} -S ${shader_stage} -D${shader_stage_upper}_SHADER ${glsl_filename} ${SHADER_FLAGS} -o "${SPV_FILE}-nopt" --depfile "${SPV_FILE}.d"
+    else()
         COMMAND Vulkan::glslangValidator -V --target-env ${target_env} -S ${shader_stage} -D${shader_stage_upper}_SHADER ${glsl_filename} ${SHADER_FLAGS} -o "${SPV_FILE}-nopt" --depfile "${SPV_FILE}.d"
+    endif()
         DEPENDS "${glsl_filename}"
         DEPFILE "${SPV_FILE}.d"
         VERBATIM

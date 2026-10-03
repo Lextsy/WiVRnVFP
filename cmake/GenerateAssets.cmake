@@ -16,9 +16,17 @@ function(wivrn_generate_ktx)
     cmake_path(GET arg_DESTINATION PARENT_PATH DEST_DIR)
     file(MAKE_DIRECTORY ${DEST_DIR})
 
-    add_custom_command(OUTPUT ${arg_DESTINATION}
-        COMMAND ${KTX} create --encode uastc --uastc-quality 4 --generate-mipmap --zstd 20 --format R8G8B8A8_SRGB ${arg_SOURCE} ${arg_DESTINATION}
-        DEPENDS ${arg_SOURCE})
+    if(ANDROID)
+        # On Android, libktx provides KTX-Software library; skip texture generation
+        # and copy PNG directly as fallback
+        add_custom_command(OUTPUT ${arg_DESTINATION}
+            COMMAND ${CMAKE_COMMAND} -E copy ${arg_SOURCE} ${arg_DESTINATION}
+            DEPENDS ${arg_SOURCE})
+    else()
+        add_custom_command(OUTPUT ${arg_DESTINATION}
+            COMMAND ${KTX} create --encode uastc --uastc-quality 4 --generate-mipmap --zstd 20 --format R8G8B8A8_SRGB ${arg_SOURCE} ${arg_DESTINATION}
+            DEPENDS ${arg_SOURCE})
+    endif()
 
     if (DEFINED arg_TARGET)
         add_file_to_target(${arg_TARGET} ${arg_DESTINATION})

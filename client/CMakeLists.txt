@@ -43,8 +43,12 @@ if(ANDROID)
 
     find_library(ANDROID_LIBRARY NAMES android REQUIRED)
     find_library(MEDIA_LIBRARY NAMES mediandk REQUIRED)
-    find_library(AAUDIO_LIBRARY NAMES aaudio REQUIRED)
-    target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY} ${AAUDIO_LIBRARY})
+    find_library(AAUDIO_LIBRARY NAMES aaudio OPTIONAL)
+    if(AAUDIO_LIBRARY)
+        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY} ${AAUDIO_LIBRARY})
+    else()
+        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY})
+    endif()
 
     # The OpenXR loader must be dynamically loaded or the Oculus store will refuse it with "Oculus SDK not found or older than 1.0"
     set(DYNAMIC_LOADER ON)
@@ -62,6 +66,11 @@ if(ANDROID)
     FetchContent_MakeAvailable(curl)
     target_link_libraries(wivrn libcurl_static)
 
+    # NDK r28 removed AndroidNdkModules; link manually
+    set(NDK_NATIVE_APP_GLUE_SOURCE "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
+    set(NDK_NATIVE_APP_GLUE_HEADER "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.h")
+    add_library(native_app_glue OBJECT "${NDK_NATIVE_APP_GLUE_SOURCE}")
+    target_include_directories(native_app_glue INTERFACE "${NDK_NATIVE_APP_GLUE_HEADER}")
     target_link_libraries(wivrn native_app_glue)
     target_compile_definitions(wivrn PRIVATE -DXR_USE_PLATFORM_ANDROID -DVK_USE_PLATFORM_ANDROID_KHR)
     target_link_options(wivrn PRIVATE -Wl,--undefined=ANativeActivity_onCreate)
