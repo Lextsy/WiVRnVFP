@@ -117,14 +117,14 @@ decoder::decoder(
 	auto height = description.height / (stream_index == 2 ? 2 : 1);
 
 	AImageReader * ir;
-	check(AImageReader_newWithUsage(
+	media_status_t ir_status = AImageReader_newWithUsage(
 	              width,
 	              height,
 	              AIMAGE_FORMAT_PRIVATE,
 	              AHARDWAREBUFFER_USAGE_CPU_READ_NEVER | AHARDWAREBUFFER_USAGE_CPU_WRITE_NEVER | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
 	              scenes::stream::image_buffer_size + 4 /* maxImages */,
-	              &ir),
-	      "AImageReader_newWithUsage");
+	              &ir);
+	check(ir_status, "AImageReader_newWithUsage");
 	image_reader.reset(ir, AImageReader_deleter{});
 
 	AImageReader_ImageListener listener{this, on_image_available};
@@ -140,19 +140,15 @@ decoder::decoder(
 		// latency mode
 		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_WIDTH, width);
 		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_HEIGHT, height);
-		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_OPERATING_RATE, std::ceil(description.frame_rate));
-		AMediaFormat_setInt32(format.get(), AMEDIAFORMAT_KEY_PRIORITY, 0);
+		AMediaFormat_setString(format.get(), "operating-rate", std::to_string(std::ceil(description.frame_rate)).c_str());
+		AMediaFormat_setString(format.get(), "priority", "0");
 
 		media_codec.reset(AMediaCodec_createDecoderByType(mime(description.codec[stream_index])));
 
 		if (not media_codec)
 			throw std::runtime_error(std::string("Cannot create decoder for MIME type ") + mime(description.codec[stream_index]));
 
-		char * codec_name = nullptr;
-		media_status_t name_status = AMediaCodec_getName(media_codec.get(), &codec_name);
-		check(name_status, "AMediaCodec_getName");
-		spdlog::info("Created MediaCodec decoder \"{}\"", codec_name);
-		AMediaCodec_releaseName(media_codec.get(), codec_name);
+		spdlog::info("Created MediaCodec decoder for {}", mime(description.codec[stream_index]));
 
 		ANativeWindow * window;
 
@@ -164,8 +160,10 @@ decoder::decoder(
 		        .onAsyncFormatChanged = decoder::on_media_format_changed,
 		        .onAsyncError = decoder::on_media_error,
 		};
-		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
-		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
+		if (api_level >= 28) {
+			media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
+			check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
+		}
 
 		check(AMediaCodec_configure(media_codec.get(), format.get(), window, nullptr /* crypto */, 0 /* flags */),
 		      "AMediaCodec_configure");
@@ -415,7 +413,7 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		check(hb_status, "AImage_getHardwareBuffer");
 
 		AHardwareBuffer_Desc buffer_desc{};
-		AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 
@@ -693,10 +691,13 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 {
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
 	char * name = nullptr;
-	media_status_t name_status = AMediaCodec_getName(media_codec, &name);
-	check(name_status, "AMediaCodec_getName");
+	if (api_level >= 28) {
+		media_status_t name_status = AMediaCodec_getName(media_codec, &name);
+		check(name_status, "AMediaCodec_getName");
+	}
 	auto release = [&]() {
-		AMediaCodec_releaseName(media_codec, name);
+		if (api_level >= 28)
+			AMediaCodec_releaseName(media_codec, name);
 	};
 	for (const char * prefix: {
 	             "OMX.google",
