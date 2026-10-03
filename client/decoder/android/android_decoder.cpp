@@ -157,10 +157,12 @@ decoder::decoder(
 		};
 	#pragma clang diagnostic push
 	#pragma clang diagnostic ignored "-Wunreachable-code"
+#if __ANDROID_API__ >= 28
 	if (api_level >= 28) {
 		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
 		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
 	}
+#endif
 	#pragma clang diagnostic pop
 
 		check(AMediaCodec_configure(media_codec.get(), format.get(), window, nullptr /* crypto */, 0 /* flags */),
@@ -403,10 +405,9 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
+#if __ANDROID_API__ >= 28
 	if (api_level >= 28)
 	{
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunreachable-code"
 		// API 28+: Use AImage_getHardwareBuffer with AHardwareBuffer_describe
 		AHardwareBuffer * hardware_buffer = nullptr;
 		media_status_t hb_status = AImage_getHardwareBuffer(image, &hardware_buffer);
@@ -416,8 +417,13 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
-#pragma clang diagnostic pop
-
+#else
+	if (false)
+	{
+		// API 28+: Use AImage_getHardwareBuffer with AHardwareBuffer_describe
+		AHardwareBuffer_Desc buffer_desc{};
+		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*(AHardwareBuffer *)nullptr);
+#endif
 		if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
 		{
 			memcpy(&ahb_format, &format_properties, sizeof(format_properties));
