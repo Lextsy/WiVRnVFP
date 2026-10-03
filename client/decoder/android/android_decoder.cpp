@@ -535,18 +535,21 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 		vk::raii::Image vimage(device, img_info);
 
-		vk::DeviceImageMemoryRequirements mem_reqs{vimage};
-		vk::MemoryRequirements mem_reqs2 = device.getImageMemoryRequirements(mem_reqs);
+		auto [mem_reqs, dedicated] = device.getImageMemoryRequirements2<vk::MemoryRequirements2, vk::MemoryDedicatedRequirements>({.image = *vimage});
 		vk::MemoryAllocateInfo mem_info{
-		        .allocationSize = mem_reqs2.size,
-		        .memoryTypeIndex = (uint32_t)(ffs(mem_reqs2.memoryTypeBits) - 1),
+		        .allocationSize = mem_reqs.memoryRequirements.size,
+		        .memoryTypeIndex = (uint32_t)(ffs(mem_reqs.memoryRequirements.memoryTypeBits) - 1),
 		};
 
 		vk::raii::DeviceMemory memory(device, mem_info);
 		vimage.bindMemory(*memory, 0);
 
 		// Convert from AImage planes to Vulkan image
-		vk::DeviceMemoryMapInfo map_info{memory};
+		vk::MemoryMapInfo map_info{
+		        .memory = *memory,
+		        .offset = 0,
+		        .size = mem_reqs.memoryRequirements.size,
+		};
 		auto mapped = device.mapMemory(map_info);
 		uint8_t * dst = static_cast<uint8_t *>(mapped);
 
@@ -613,7 +616,9 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			}
 		}
 
-		vk::DeviceMemoryUnmapInfo unmap_info{memory};
+		vk::MemoryUnmapInfo unmap_info{
+		        .memory = *memory,
+		};
 		device.unmapMemory(unmap_info);
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
