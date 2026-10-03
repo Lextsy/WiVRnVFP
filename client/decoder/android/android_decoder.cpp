@@ -508,9 +508,12 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 	else
 	{
 		// API 25: Use AImage_getPlanes with manual buffer upload
-		AImage_Format format = AImage_getFormat(image);
-		uint32_t width = AImage_getWidth(image);
-		uint32_t height = AImage_getHeight(image);
+		int32_t format;
+		AImage_getFormat(image, &format);
+		int32_t width;
+		AImage_getWidth(image, &width);
+		int32_t height;
+		AImage_getHeight(image, &height);
 
 		vk::Format vk_format = vk::Format::eR8G8B8A8_UNORM;
 		if (format == AIMAGE_FORMAT_YV12 || format == AIMAGE_FORMAT_NV21)
