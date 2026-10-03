@@ -409,12 +409,11 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 	if (api_level >= 26)
 	{
 		// API 26+: Use AImage_getHardwareBuffer
-		AHardwareBuffer * hardware_buffer;
-		check(AImage_getHardwareBuffer(image, &hardware_buffer), "AImage_getHardwareBuffer");
+		media_status_t hb_status = AImage_getHardwareBuffer(image, &hardware_buffer);
+		check(hb_status, "AImage_getHardwareBuffer");
 
 		AHardwareBuffer_Desc buffer_desc{};
-		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
-		check(desc_status, "AHardwareBuffer_describe");
+		AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 
@@ -546,15 +545,11 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		vimage.bindMemory(*memory, 0);
 
 		// Convert from AImage planes to Vulkan image
-		VkMemoryMapInfoKHR map_info{};
-		map_info.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR;
-		map_info.memory = *memory;
-		map_info.offset = 0;
-		map_info.size = mem_reqs.memoryRequirements.size;
-		VkDeviceMemoryMapInfo map_info2{&map_info};
 		void * mapped = nullptr;
-		VkResult map_result = device.mapMemoryKHR(map_info2, &mapped);
-		check(map_result, "vkMapMemory");
+		VkResult map_result = vkMapMemory(*device, *memory, 0, mem_reqs.memoryRequirements.size, 0, &mapped);
+		if (map_result != VK_SUCCESS) {
+			throw std::runtime_error("vkMapMemory failed");
+		}
 		uint8_t * dst = static_cast<uint8_t *>(mapped);
 
 		switch (format)
@@ -620,11 +615,10 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			}
 		}
 
-		VkMemoryUnmapInfoKHR unmap_info{};
-		unmap_info.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR;
-		unmap_info.memory = *memory;
-		VkResult unmap_result = device.unmapMemoryKHR(unmap_info);
-		check(unmap_result, "vkUnmapMemory");
+		VkResult unmap_result = vkUnmapMemory(*device, *memory);
+		if (unmap_result != VK_SUCCESS) {
+			throw std::runtime_error("vkUnmapMemory failed");
+		}
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
 		        .image = *vimage,
@@ -700,8 +694,8 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 {
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
 	char * name = nullptr;
-	media_status_t get_name_status = AMediaCodec_getName(media_codec, &name);
-	check(get_name_status, "AMediaCodec_getName");
+	media_status_t name_status = AMediaCodec_getName(media_codec, &name);
+	check(name_status, "AMediaCodec_getName");
 	auto release = [&]() {
 		AMediaCodec_releaseName(media_codec, name);
 	};
