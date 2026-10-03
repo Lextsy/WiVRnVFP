@@ -68,7 +68,7 @@ if(ANDROID)
 
     # NDK r28 removed AndroidNdkModules; link manually
     set(NDK_NATIVE_APP_GLUE_SOURCE "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
-    set(NDK_NATIVE_APP_GLUE_HEADER "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.h")
+    set(NDK_NATIVE_APP_GLUE_HEADER "${ANDROID_NDK}/sources/android/native_app_glue")
     add_library(native_app_glue OBJECT "${NDK_NATIVE_APP_GLUE_SOURCE}")
     target_include_directories(native_app_glue INTERFACE "${NDK_NATIVE_APP_GLUE_HEADER}")
     target_link_libraries(wivrn native_app_glue)
