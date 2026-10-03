@@ -413,7 +413,7 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		check(AImage_getHardwareBuffer(image, &hardware_buffer), "AImage_getHardwareBuffer");
 
 		AHardwareBuffer_Desc buffer_desc{};
-		AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+		check(AHardwareBuffer_describe(hardware_buffer, &buffer_desc), "AHardwareBuffer_describe");
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 
@@ -515,9 +515,9 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		int32_t height;
 		AImage_getHeight(image, &height);
 
-		vk::Format vk_format = vk::Format::eR8G8B8A8_UNORM;
+		vk::Format vk_format = vk::Format::eR8G8B8A8Unorm;
 		if (format == AIMAGE_FORMAT_YUV_420_888)
-			vk_format = vk::Format::eBGRX8888_UNORM;
+			vk_format = vk::Format::eB8G8R8A8Unorm;
 
 		vk::ImageCreateInfo img_info{
 		        .flags = {},
@@ -535,17 +535,20 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 		vk::raii::Image vimage(device, img_info);
 
-		vk::MemoryRequirements mem_reqs = device.getImageMemoryRequirements(*vimage);
+		vk::DeviceImageMemoryRequirements mem_reqs{vimage};
+		vk::MemoryRequirements mem_reqs2 = device.getImageMemoryRequirements(mem_reqs);
 		vk::MemoryAllocateInfo mem_info{
-		        .allocationSize = mem_reqs.size,
-		        .memoryTypeIndex = (uint32_t)(ffs(mem_reqs.memoryTypeBits) - 1),
+		        .allocationSize = mem_reqs2.size,
+		        .memoryTypeIndex = (uint32_t)(ffs(mem_reqs2.memoryTypeBits) - 1),
 		};
 
 		vk::raii::DeviceMemory memory(device, mem_info);
 		vimage.bindMemory(*memory, 0);
 
 		// Convert from AImage planes to Vulkan image
-		uint8_t * dst = static_cast<uint8_t *>(device.mapMemory(*memory, 0, mem_reqs.size, vk::MemoryMapFlags{}));
+		vk::DeviceMemoryMapInfo map_info{memory};
+		auto mapped = device.mapMemory(map_info);
+		uint8_t * dst = static_cast<uint8_t *>(mapped);
 
 		switch (format)
 		{
@@ -610,7 +613,8 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			}
 		}
 
-		device.unmapMemory(*memory);
+		vk::DeviceMemoryUnmapInfo unmap_info{memory};
+		device.unmapMemory(unmap_info);
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
 		        .image = *vimage,
@@ -631,8 +635,8 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		handle->image_view = std::move(image_view);
 		handle->memory = std::move(memory);
 		handle->extent = vk::Extent2D{
-		        .width = width,
-		        .height = height,
+		        .width = static_cast<uint32_t>(width),
+		        .height = static_cast<uint32_t>(height),
 		};
 
 		return handle;
@@ -685,10 +689,13 @@ void decoder::on_media_output_available(AMediaCodec * media_codec, void * userda
 static bool hardware_accelerated(AMediaCodec * media_codec)
 {
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
-	char * name;
-	AMediaCodec_getName(media_codec, &name);
+	char * name = nullptr;
+	check(AMediaCodec_getName(media_codec, &name), "AMediaCodec_getName");
 	auto release = [&]() {
-		AMediaCodec_releaseName(media_codec, name);
+		media_status_t status = AMediaCodec_releaseName(media_codec, name);
+		if (status != AMEDIA_OK) {
+			spdlog::warn("AMediaCodec_releaseName failed: {}", status);
+		}
 	};
 	for (const char * prefix: {
 	             "OMX.google",
