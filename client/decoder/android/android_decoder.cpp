@@ -516,14 +516,14 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		AImage_getHeight(image, &height);
 
 		vk::Format vk_format = vk::Format::eR8G8B8A8_UNORM;
-		if (format == AIMAGE_FORMAT_YV12 || format == AIMAGE_FORMAT_NV21)
+		if (format == AIMAGE_FORMAT_YUV_420_888)
 			vk_format = vk::Format::eBGRX8888_UNORM;
 
 		vk::ImageCreateInfo img_info{
 		        .flags = {},
 		        .imageType = vk::ImageType::e2D,
 		        .format = vk_format,
-		        .extent = {width, height, 1},
+		        .extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1},
 		        .mipLevels = 1,
 		        .arrayLayers = 1,
 		        .samples = vk::SampleCountFlagBits::e1,
@@ -549,31 +549,30 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 		switch (format)
 		{
-			case AIMAGE_FORMAT_YV12:
-			case AIMAGE_FORMAT_NV21:
+			case AIMAGE_FORMAT_YUV_420_888:
 			{
 				// YUV420 planar
-				AImage_Plane * y_plane;
-				check(AImage_getPlane(image, 0, &y_plane), "AImage_getPlane(0)");
+				uint8_t * y_data = nullptr;
+				int y_data_length = 0;
+				check(AImage_getPlaneData(image, 0, &y_data, &y_data_length), "AImage_getPlaneData(0)");
 
-				AImage_Plane * u_plane;
-				check(AImage_getPlane(image, 1, &u_plane), "AImage_getPlane(1)");
+				uint8_t * u_data = nullptr;
+				int u_data_length = 0;
+				check(AImage_getPlaneData(image, 1, &u_data, &u_data_length), "AImage_getPlaneData(1)");
 
-				AImage_Plane * v_plane;
-				check(AImage_getPlane(image, 2, &v_plane), "AImage_getPlane(2)");
+				uint8_t * v_data = nullptr;
+				int v_data_length = 0;
+				check(AImage_getPlaneData(image, 2, &v_data, &v_data_length), "AImage_getPlaneData(2)");
 
-				const uint8_t * y_data = AImage_getPlaneData(y_plane);
-				const uint8_t * u_data = AImage_getPlaneData(u_plane);
-				const uint8_t * v_data = AImage_getPlaneData(v_plane);
 
 				// Simple YUV to RGB conversion (could be optimized)
 				for (uint32_t y = 0; y < height; y++)
 				{
 					for (uint32_t x = 0; x < width; x++)
 					{
-						int Y = y_data[y * AImage_getPlaneRowStride(y_plane) + x];
-						int U = u_data[(y >> 1) * AImage_getPlaneRowStride(u_plane) + (x >> 1)];
-						int V = v_data[(y >> 1) * AImage_getPlaneRowStride(v_plane) + (x >> 1)];
+						int Y = y_data[y * AImage_getPlaneRowStride(image, 0) + x];
+						int U = u_data[(y >> 1) * AImage_getPlaneRowStride(image, 1) + (x >> 1)];
+						int V = v_data[(y >> 1) * AImage_getPlaneRowStride(image, 2) + (x >> 1)];
 
 						// BT.601 conversion
 						int R = Y + 1.402f * (V - 128);
@@ -591,11 +590,10 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			default:
 			{
 				// RGBA
-				AImage_Plane * plane;
-				check(AImage_getPlane(image, 0, &plane), "AImage_getPlane(0)");
-
-				const uint8_t * src = AImage_getPlaneData(plane);
-				int row_stride = AImage_getPlaneRowStride(plane);
+				uint8_t * src = nullptr;
+				int src_length = 0;
+				check(AImage_getPlaneData(image, 0, &src, &src_length), "AImage_getPlaneData(0)");
+				int row_stride = AImage_getPlaneRowStride(image, 0);
 
 				for (uint32_t y = 0; y < height; y++)
 				{
