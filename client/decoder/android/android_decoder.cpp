@@ -115,16 +115,11 @@ decoder::decoder(
 
 	auto width = description.width;
 	auto height = description.height / (stream_index == 2 ? 2 : 1);
+	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
 
 	AImageReader * ir;
-	media_status_t ir_status = AImageReader_newWithUsage(
-	              width,
-	              height,
-	              AIMAGE_FORMAT_PRIVATE,
-	              AHARDWAREBUFFER_USAGE_CPU_READ_NEVER | AHARDWAREBUFFER_USAGE_CPU_WRITE_NEVER | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
-	              scenes::stream::image_buffer_size + 4 /* maxImages */,
-	              &ir);
-	check(ir_status, "AImageReader_newWithUsage");
+	media_status_t ir_status = AImageReader_new(width, height, AIMAGE_FORMAT_PRIVATE, 2, &ir);
+	check(ir_status, "AImageReader_new");
 	image_reader.reset(ir, AImageReader_deleter{});
 
 	AImageReader_ImageListener listener{this, on_image_available};
@@ -689,6 +684,8 @@ void decoder::on_media_output_available(AMediaCodec * media_codec, void * userda
 
 static bool hardware_accelerated(AMediaCodec * media_codec)
 {
+	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+
 	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
 	char * name = nullptr;
 	if (api_level >= 28) {
