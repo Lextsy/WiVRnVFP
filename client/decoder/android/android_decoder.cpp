@@ -413,7 +413,8 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		check(AImage_getHardwareBuffer(image, &hardware_buffer), "AImage_getHardwareBuffer");
 
 		AHardwareBuffer_Desc buffer_desc{};
-		check(AHardwareBuffer_describe(hardware_buffer, &buffer_desc), "AHardwareBuffer_describe");
+		media_status_t desc_status = AHardwareBuffer_describe(hardware_buffer, &buffer_desc);
+		check(desc_status, "AHardwareBuffer_describe");
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 
@@ -545,12 +546,15 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		vimage.bindMemory(*memory, 0);
 
 		// Convert from AImage planes to Vulkan image
-		vk::MemoryMapInfo map_info{
-		        .memory = *memory,
-		        .offset = 0,
-		        .size = mem_reqs.memoryRequirements.size,
-		};
-		auto mapped = device.mapMemory(map_info);
+		VkMemoryMapInfoKHR map_info{};
+		map_info.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR;
+		map_info.memory = *memory;
+		map_info.offset = 0;
+		map_info.size = mem_reqs.memoryRequirements.size;
+		VkDeviceMemoryMapInfo map_info2{&map_info};
+		void * mapped = nullptr;
+		VkResult map_result = device.mapMemoryKHR(map_info2, &mapped);
+		check(map_result, "vkMapMemory");
 		uint8_t * dst = static_cast<uint8_t *>(mapped);
 
 		switch (format)
@@ -616,10 +620,11 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 			}
 		}
 
-		vk::MemoryUnmapInfo unmap_info{
-		        .memory = *memory,
-		};
-		device.unmapMemory(unmap_info);
+		VkMemoryUnmapInfoKHR unmap_info{};
+		unmap_info.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR;
+		unmap_info.memory = *memory;
+		VkResult unmap_result = device.unmapMemoryKHR(unmap_info);
+		check(unmap_result, "vkUnmapMemory");
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
 		        .image = *vimage,
