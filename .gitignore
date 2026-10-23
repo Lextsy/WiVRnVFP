@@ -3,6 +3,7 @@
 .cache/
 .direnv/
 .gradle/
+.omp/
 _deps/
 .idea/
 .vscode/
@@ -21,4 +22,5 @@ a.out
 gradle.properties
 local.properties
 compile_commands.json
+openssl-prebuilt/
 !libopenxr_loader.so

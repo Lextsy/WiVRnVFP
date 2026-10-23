@@ -49,7 +49,7 @@ void intent::start(std::function<void(int, intent &&)> callback)
 
 	callbacks.emplace(request_code, std::move(callback));
 
-	jni::object<""> activity(application::native_app()->activity->clazz);
+	jni::object<""> activity(application::activity());
 
 	activity.call<void>("startActivityForResult", obj, jni::Int{request_code});
 }

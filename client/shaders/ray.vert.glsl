@@ -17,7 +17,12 @@
  */
 
 #version 450
+#ifdef WIVRN_MULTIVIEW
 #extension GL_EXT_multiview : require
+#define wivrn_view gl_ViewIndex
+#else
+#define wivrn_view 0
+#endif
 #extension GL_GOOGLE_include_directive : require
 
 #define SKINNED 0

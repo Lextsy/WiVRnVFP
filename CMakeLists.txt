@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 project(WiVRn VERSION 0.0.0 LANGUAGES C CXX)
 
-# Set default for FetchContent projects
+#Set default for FetchContent projects
 set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
@@ -14,7 +14,7 @@ if(ANDROID)
     list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/android)
 endif()
 
-# Default to PIC code
+#Default to PIC code
 include(CheckPIESupported)
 check_pie_supported()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -39,6 +39,7 @@ option(WIVRN_COMPRESS_GLB "Compress textures in GLB files with gltf-transform" O
 option(WIVRN_USE_ANDROID_VALIDATION_LAYER "Download the android version of the Vulkan validation layer" OFF)
 option(WIVRN_USE_ANDROID_BIN_LIBKTX "Download the prebuilt libktx for android" OFF)
 option(WIVRN_BUILD_CLIENT "Build WiVRn client" OFF)
+option(WIVRN_WAVE_RUNTIME "Build the in-process WaveVR (HTC VIVE Focus) OpenXR runtime shim into the Android client" OFF)
 option(WIVRN_BUILD_SERVER "Build WiVRn server" ON)
 option(WIVRN_BUILD_SERVER_LIBRARY "Build OpenXR library for WiVRn server" ${WIVRN_BUILD_SERVER})
 option(WIVRN_BUILD_DASHBOARD "Build WiVRn dashboard" OFF)
@@ -50,13 +51,21 @@ option(WIVRN_OPTIMIZE_SHADERS "Run spirv-opt on compiled shaders" ON)
 option(WIVRN_DEBUG_SHADERS "Compile shaders with debug information" OFF)
 option(WIVRN_ADDRESS_SANITIZER "Use address sanitizer" OFF)
 
-# V4L2 decoder on by default on Linux AArch64
+#V4L2 decoder on by default on Linux AArch64
 set(_WIVRN_USE_V4L2_DEFAULT OFF)
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" AND NOT ANDROID)
     set(_WIVRN_USE_V4L2_DEFAULT ON)
 endif()
 option(WIVRN_USE_V4L2 "Enable V4L2 hardware video decoder" ${_WIVRN_USE_V4L2_DEFAULT})
 unset(_WIVRN_USE_V4L2_DEFAULT)
+
+
+if(ANDROID)
+#The NDK's libvulkan.so import library for API < 26 exports only the Vulkan 1.0 entry
+#points, so VMA's static imports of vkGetBufferMemoryRequirements2 & co. are undefined
+#at link time.Importing through vkGetInstanceProcAddr works on every API level.
+    add_compile_definitions(VMA_STATIC_VULKAN_FUNCTIONS=0)
+endif()
 
 if(WIVRN_OPTIMIZE_SHADERS AND WIVRN_DEBUG_SHADERS)
     message(FATAL_ERROR "WIVRN_OPTIMIZE_SHADERS and WIVRN_DEBUG_SHADERS are incompatible")
@@ -113,7 +122,12 @@ if(ENABLE_COLOURED_OUTPUT)
 	endif()
 endif()
 
-find_package(PkgConfig REQUIRED)
+if (ANDROID)
+#The Android build reaches none of the pkg_check_modules calls below.
+    find_package(PkgConfig QUIET)
+else()
+    find_package(PkgConfig REQUIRED)
+endif()
 find_package(Vulkan REQUIRED)
 find_package(Git)
 if (NEED_COMMON)
@@ -168,7 +182,7 @@ if (WIVRN_BUILD_DASHBOARD)
     find_package(Qt6 REQUIRED COMPONENTS Core Quick Test Gui QuickControls2 Widgets Network)
 
     if(Qt6_VERSION VERSION_GREATER_EQUAL 6.10.0)
-        # QtCoro needs this for Qt 6.10 and (currently) doesn't do this by itself
+#QtCoro needs this for Qt 6.10 and (currently) doesn't do this by itself
         find_package(Qt6 REQUIRED COMPONENTS QmlPrivate)
     endif()
 
@@ -183,7 +197,13 @@ if (WIVRN_BUILD_DASHBOARD)
 endif()
 
 if (WIVRN_BUILD_CLIENT OR WIVRN_BUILD_DASHBOARD)
-    find_package(Gettext REQUIRED)
+#msgfmt is only reached through CREATE_MO_FILES, which the Android client
+#never calls; requiring it breaks Android hosts that have no gettext.
+    if (ANDROID)
+        find_package(Gettext QUIET)
+    else()
+        find_package(Gettext REQUIRED)
+    endif()
 endif()
 
 if (WIVRN_USE_PIPEWIRE AND (WIVRN_BUILD_SERVER OR (WIVRN_BUILD_CLIENT AND NOT ANDROID)))
@@ -224,9 +244,9 @@ if(ANDROID)
     set(ANDROID_NDK $ENV{ANDROID_NDK_ROOT})
     set(CMAKE_ANDROID_NDK $ENV{ANDROID_NDK_ROOT})
 
-    # Runtime API level checks are used instead of compile-time guards
-    # to support both API 25 (Vive Focus Plus) and API 26+ (Oculus Quest)
-    # from the same binary
+#Runtime API level checks are used instead of compile - time guards
+#to support both API 25(Vive Focus Plus) and API 26 + (Oculus Quest)
+#from the same binary
 endif()
 
 if (WIVRN_BUILD_DISSECTOR)
@@ -241,11 +261,11 @@ if (WIVRN_BUILD_WIVRNCTL)
     pkg_search_module(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd libelogind)
 endif()
 
-# Common dependencies
+#Common dependencies
 FetchContent_Declare(boost         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/boostorg/boost/releases/download/boost-1.89.0/boost-1.89.0-cmake.tar.xz
                                    URL_HASH SHA256=67acec02d0d118b5de9eb441f5fb707b3a1cdd884be00ca24b9a73c995511f74)
 
-# Client dependencies
+#Client dependencies
 FetchContent_Declare(simdjson      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/simdjson/simdjson/archive/refs/tags/v4.2.2.tar.gz
                                    URL_HASH SHA256=3efae22cb41f83299fe0b2e8a187af543d3dda93abbb910586f897df670f9eaa)
 FetchContent_Declare(fastgltf      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/spnda/fastgltf/archive/refs/tags/v0.9.0.tar.gz
@@ -266,9 +286,17 @@ FetchContent_Declare(libktx        EXCLUDE_FROM_ALL SYSTEM URL https://github.co
 FetchContent_Declare(implot        EXCLUDE_FROM_ALL SYSTEM URL https://github.com/epezent/implot/releases/download/v1.0/implot-v1.0.tar.gz
                                    URL_HASH SHA256=20ca14d5a46f36a650746096c74eba8bea99c9432cd3c877343b96b17a6ae566)
 file(GLOB IMGUI_PATCHES CONFIGURE_DEPENDS patches/imgui/*)
+# apply.sh is a POSIX shell script: cmd.exe cannot execute it, and FetchContent would
+# silently skip the patches (the stamp is created, the sources stay unpatched).
+find_program(SH_EXECUTABLE sh)
+if(SH_EXECUTABLE)
+    set(IMGUI_PATCH_COMMAND ${SH_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${IMGUI_PATCHES})
+else()
+    set(IMGUI_PATCH_COMMAND ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${IMGUI_PATCHES})
+endif()
 FetchContent_Declare(imgui         EXCLUDE_FROM_ALL SYSTEM URL https://github.com/ocornut/imgui/archive/refs/tags/v1.92.9.tar.gz
                                    URL_HASH SHA256=af97ed649182c39314320514a672b82008ab462b9293fe23d37b30bfa5d05519
-                                   PATCH_COMMAND    ${CMAKE_CURRENT_LIST_DIR}/patches/apply.sh ${IMGUI_PATCHES}
+                                   PATCH_COMMAND    ${IMGUI_PATCH_COMMAND}
 )
 FetchContent_Declare(uni-algo      EXCLUDE_FROM_ALL SYSTEM URL https://github.com/uni-algo/uni-algo/archive/v1.2.0.tar.gz
                                    URL_HASH SHA256=f2a1539cd8635bc6088d05144a73ecfe7b4d74ee0361fabed6f87f9f19e74ca9)

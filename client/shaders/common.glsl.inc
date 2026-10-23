@@ -3,6 +3,10 @@
 const int nb_views = 2;
 const int nb_texcoords = 2;
 
+// use_pbr stays false: the fragment shader's non-PBR path is the intended
+// rendering. The bindings it would use in the PBR path (metallic_roughness,
+// occlusion) are forced into the fragment interface by wivrn_force_bindings()
+// below, so the descriptor set layout stays consistent with the shader.
 const bool use_pbr = false;
 const bool use_normal_maps = true;
 
@@ -56,6 +60,28 @@ layout(std140, set = 0, binding = 8) uniform material_ubo
     texture_info emissive;
     texture_info normal;
 } material;
+
+// Adreno 540 (Vulkan 1.0) null-derefs inside vkUpdateDescriptorSets when a
+// descriptor set layout binding is absent from the bound shader stage's SPIR-V
+// interface. The shared layout (layout_bindings_0) declares all nine bindings,
+// so every shader that uses it must declare every binding in its interface,
+// even when the real code path does not read it. Touch each binding in a branch
+// the compiler cannot prove dead; the body is empty, so rendering is unchanged.
+layout(constant_id = 4) const bool force_bindings = true;
+void wivrn_force_bindings()
+{
+    if (force_bindings)
+    {
+        float x = mesh.model[0][0] + joints.joint_matrices[0][0][0];
+#ifdef FRAG_SHADER
+        x += texture(metallic_roughness_texture, vec2(0.0)).x + texture(occlusion_texture, vec2(0.0)).x;
+#endif
+        if (x == 1.234567812345678)
+        {
+            // unreachable: keeps the reads (and thus the bindings) in the interface
+        }
+    }
+}
 
 const float dither_pattern[4][4] = {
 	{ 0.0f, 0.5f, 0.125f, 0.625f},

@@ -43,17 +43,34 @@ if(ANDROID)
 
     find_library(ANDROID_LIBRARY NAMES android REQUIRED)
     find_library(MEDIA_LIBRARY NAMES mediandk REQUIRED)
+    # OpenSL ES is the audio backend on API < 26 (AAudio is 26+)
+    find_library(OPENSLES_LIBRARY NAMES OpenSLES REQUIRED)
     find_library(AAUDIO_LIBRARY NAMES aaudio OPTIONAL)
     if(AAUDIO_LIBRARY)
-        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY} ${AAUDIO_LIBRARY})
+        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY} ${AAUDIO_LIBRARY} ${OPENSLES_LIBRARY})
     else()
-        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY})
+        target_link_libraries(wivrn ${ANDROID_LIBRARY} ${MEDIA_LIBRARY} ${OPENSLES_LIBRARY})
     endif()
 
     # The OpenXR loader must be dynamically loaded or the Oculus store will refuse it with "Oculus SDK not found or older than 1.0"
-    set(DYNAMIC_LOADER ON)
-    FetchContent_MakeAvailable(openxr_loader)
-    target_link_libraries(wivrn openxr_loader)
+    # The VIVE Focus Plus has no OpenXR loader at all: WIVRN_WAVE_RUNTIME builds the
+    # in-process WaveVR shim instead, which exports the same entry points.
+    if(WIVRN_WAVE_RUNTIME)
+        # OpenXR headers only: AGP packages every shared library the CMake build produces,
+        # so building the loader would ship a libopenxr_loader.so the client never links.
+        set(BUILD_LOADER OFF)
+        FetchContent_MakeAvailable(openxr_loader)
+        add_subdirectory(wave)
+        target_link_libraries(wivrn wivrn_wave OpenXR::headers)
+        add_dependencies(wivrn generate_openxr_header)
+        # The Wave shim presents projection layers only: scenes must composite
+        # their imgui quad layers into the projection images themselves.
+        target_compile_definitions(wivrn PRIVATE WIVRN_WAVE_RUNTIME=1)
+    else()
+        set(DYNAMIC_LOADER ON)
+        FetchContent_MakeAvailable(openxr_loader)
+        target_link_libraries(wivrn openxr_loader)
+    endif()
 
     # libcurl
     set(BUILD_CURL_EXE OFF)
@@ -66,14 +83,7 @@ if(ANDROID)
     FetchContent_MakeAvailable(curl)
     target_link_libraries(wivrn libcurl_static)
 
-    # NDK r28 removed AndroidNdkModules; link manually
-    set(NDK_NATIVE_APP_GLUE_SOURCE "${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c")
-    set(NDK_NATIVE_APP_GLUE_HEADER "${ANDROID_NDK}/sources/android/native_app_glue")
-    add_library(native_app_glue OBJECT "${NDK_NATIVE_APP_GLUE_SOURCE}")
-    target_include_directories(native_app_glue INTERFACE "${NDK_NATIVE_APP_GLUE_HEADER}")
-    target_link_libraries(wivrn native_app_glue)
     target_compile_definitions(wivrn PRIVATE -DXR_USE_PLATFORM_ANDROID -DVK_USE_PLATFORM_ANDROID_KHR)
-    target_link_options(wivrn PRIVATE -Wl,--undefined=ANativeActivity_onCreate)
 
     target_link_options(wivrn
         PRIVATE
@@ -164,7 +174,7 @@ file(GLOB LOCAL_SOURCE CONFIGURE_DEPENDS
 
 file(GLOB_RECURSE VULKAN_SHADERS CONFIGURE_DEPENDS "*.glsl")
 target_sources(wivrn PRIVATE ${LOCAL_SOURCE} ${VULKAN_SHADERS})
-wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS})
+wivrn_compile_glsl(wivrn SHADERS ${VULKAN_SHADERS} MULTIVIEW_VARIANTS)
 
 target_link_libraries(wivrn
     Boost::locale

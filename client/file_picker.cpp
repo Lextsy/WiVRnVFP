@@ -48,7 +48,7 @@ std::future<file_picker_result> file_picker::open()
 				auto uri = data.get_uri();
 				auto uri_string = (std::string)uri.call<jni::string>("toString");
 
-				jni::object<""> activity(application::native_app()->activity->clazz);
+				jni::object<""> activity(application::activity());
 				auto content_resolver = activity.call<jni::object<"android/content/ContentResolver">>("getContentResolver");
 
 				content_resolver.call<void>("takePersistableUriPermission", uri, jni::Int{1} /* Intent.FLAG_GRANT_READ_URI_PERMISSION */);

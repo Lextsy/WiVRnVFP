@@ -19,7 +19,12 @@
 
 #version 450
 
+#ifdef WIVRN_MULTIVIEW
 #extension GL_EXT_multiview : enable
+#define wivrn_view gl_ViewIndex
+#else
+#define wivrn_view 0
+#endif
 
 layout (constant_id = 0) const int nb_texcoords = 2;
 layout (constant_id = 1) const bool dithering = true;
@@ -72,6 +77,26 @@ layout(set = 0, binding = 8) uniform material_ubo
 } material;
 #endif
 
+
+// Adreno 540 (Vulkan 1.0) null-derefs inside vkUpdateDescriptorSets when a
+// descriptor set layout binding is absent from the bound shader stage's SPIR-V
+// interface. Touch every layout binding in every stage so the interface matches
+// layout_bindings_0; the body is empty, so rendering is unchanged.
+layout(constant_id = 4) const bool force_bindings = true;
+void wivrn_force_bindings()
+{
+    if (force_bindings)
+    {
+        float x = mesh.model[0][0] + joints.joint_matrices[0][0][0];
+#ifdef FRAG_SHADER
+        x += texture(base_color, vec2(0.0)).x + texture(metallic_roughness, vec2(0.0)).x + texture(occlusion, vec2(0.0)).x + texture(emissive, vec2(0.0)).x + texture(normal_map, vec2(0.0)).x + material.base_color_factor.x;
+#endif
+        if (x == 1.234567812345678)
+        {
+            // unreachable: keeps the reads (and thus the bindings) in the interface
+        }
+    }
+}
 // Vertex input
 #ifdef VERT_SHADER
 layout(location = 0) in vec4 in_position;
@@ -96,7 +121,8 @@ out gl_PerVertex
 
 void main()
 {
-        gl_Position = mesh.modelviewproj[gl_ViewIndex] * in_position;
+        wivrn_force_bindings();
+        gl_Position = mesh.modelviewproj[wivrn_view] * in_position;
         color = in_color;
 }
 #endif
@@ -106,6 +132,7 @@ layout(location = 0) out vec4 out_color;
 layout(early_fragment_tests) in;
 void main()
 {
+        wivrn_force_bindings();
         out_color = color;
 }
 #endif

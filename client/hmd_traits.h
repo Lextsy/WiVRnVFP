@@ -51,6 +51,12 @@ public:
 	bool needs_srgb_conversion = true;
 	bool view_locate = true; // can locate relative to view
 	bool vk_debug_ext_allowed = true;
+	// Vulkan 1.1 / API 26 capabilities. Adreno 540 (VIVE Focus Plus) exposes Vulkan 1.0
+	// on Android 7: no multiview, no YCbCr-sampled AHardwareBuffer, no push descriptors.
+	bool supports_multiview = true;
+	bool supports_ycbcr_conversion = true;
+	bool supports_android_hardware_buffer = true;
+	bool supports_push_descriptors = true;
 	bool bind_simple_controller = true;
 	bool hand_interaction_grip_surface = true;
 	bool pico_face_tracker = false;

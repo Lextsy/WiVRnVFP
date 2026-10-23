@@ -1,11 +1,15 @@
 package org.meumeu.wivrn;
 
-public class MainActivity extends android.app.NativeActivity
+public class MainActivity extends com.htc.vr.sdk.VRActivity
 {
 	static
 	{
 		System.loadLibrary("wivrn");
 	}
+
+	public native void initWave();
+
+	public native void waveDestroy();
 
 	@Override
 	public native void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults);
@@ -22,11 +26,23 @@ public class MainActivity extends android.app.NativeActivity
 	@Override
 	protected void onCreate(android.os.Bundle savedInstanceState)
 	{
+		initWave();
 		super.onCreate(savedInstanceState);
 
 		this.BatteryInfoReceiver = new BroadcastReceiver();
 		this.netcb = new org.meumeu.wivrn.NetworkInfoCallback();
 
 		this.registerReceiver(this.BatteryInfoReceiver, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+	}
+
+	@Override
+	protected void onDestroy()
+	{
+		waveDestroy();
+
+		if (this.BatteryInfoReceiver != null)
+			this.unregisterReceiver(this.BatteryInfoReceiver);
+
+		super.onDestroy();
 	}
 }

@@ -19,7 +19,12 @@
 
 #version 450
 
+#ifdef WIVRN_MULTIVIEW
 #extension GL_EXT_multiview : require
+#define wivrn_view gl_ViewIndex
+#else
+#define wivrn_view 0
+#endif
 #extension GL_GOOGLE_include_directive : require
 
 #include "common.glsl.inc"
@@ -40,6 +45,7 @@ out gl_PerVertex
 
 void main()
 {
+    wivrn_force_bindings();
     texcoord_base_color = compute_texcoord(material.base_color, in_texcoord[material.base_color.texcoord]);
     texcoord_metallic_roughness = compute_texcoord(material.metallic_roughness, in_texcoord[material.metallic_roughness.texcoord]);
     texcoord_occlusion = compute_texcoord(material.occlusion, in_texcoord[material.occlusion.texcoord]);
@@ -53,7 +59,7 @@ void main()
             in_weights.w * joints.joint_matrices[int(in_joints.w)];
 
 
-    mat3 mv = inverse(transpose(mat3(mesh.modelview[gl_ViewIndex] * skinMatrix)));
+    mat3 mv = inverse(transpose(mat3(mesh.modelview[wivrn_view] * skinMatrix)));
 
     tangent = vec4(normalize(mv * in_tangent.xyz), in_tangent.w);
     if (any(isnan(tangent))) // avoid NaNs if no tangent data is provided
@@ -61,9 +67,9 @@ void main()
 
     normal = normalize(mv * in_normal);
 
-    gl_Position = mesh.modelviewproj[gl_ViewIndex] * skinMatrix * vec4(in_position, 1.0);
+    gl_Position = mesh.modelviewproj[wivrn_view] * skinMatrix * vec4(in_position, 1.0);
 
-    frag_pos = mesh.modelview[gl_ViewIndex] * skinMatrix * vec4(in_position, 1.0);
-    light_pos = scene.view[gl_ViewIndex] * scene.light_position;
+    frag_pos = mesh.modelview[wivrn_view] * skinMatrix * vec4(in_position, 1.0);
+    light_pos = scene.view[wivrn_view] * scene.light_position;
     vertex_color = in_color;
 }

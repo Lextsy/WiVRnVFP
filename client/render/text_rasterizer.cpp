@@ -17,6 +17,7 @@
  */
 
 #include "text_rasterizer.h"
+#include "android/jnipp.h"
 #include "application.h"
 #include "vk/allocation.h"
 #include <cassert>
@@ -33,7 +34,8 @@
 #include <vulkan/vulkan_handles.hpp>
 #include <vulkan/vulkan_raii.hpp>
 
-#ifdef __ANDROID__
+// AFontMatcher and AFont require API 29
+#if defined(__ANDROID__) && __ANDROID_API__ >= 29
 #include <android/font.h>
 #include <android/font_matcher.h>
 #include <android/system_fonts.h>
@@ -84,12 +86,13 @@ text_rasterizer::text_rasterizer(vk::raii::Device & device, vk::raii::PhysicalDe
 
 #ifdef __ANDROID__
 	{
-		jni::jni_thread::setup_thread(nullptr);
-		int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+		jni::jni_thread::setup_thread();
+#if __ANDROID_API__ >= 29
+		int api_level = android_api_level();
 
-		if (api_level >= 26)
+		if (api_level >= 29)
 		{
-			// API 26+: Use AFontMatcher
+			// API 29+: Use AFontMatcher
 			std::u16string ws = u"hello";
 			AFontMatcher * font_matcher = AFontMatcher_create();
 
@@ -105,10 +108,11 @@ text_rasterizer::text_rasterizer(vk::raii::Device & device, vk::raii::PhysicalDe
 			AFontMatcher_destroy(font_matcher);
 		}
 		else
+#endif
 		{
 			// API 25: Fall back to default font path
-			font_filename = "/system/fonts/roboto-regular.ttf";
-			spdlog::warn("Using default font path (API 25 does not have AFontMatcher)");
+			font_filename = "/system/fonts/Roboto-Regular.ttf";
+			spdlog::warn("Using default font path (AFontMatcher requires API 29)");
 		}
 	}
 #else

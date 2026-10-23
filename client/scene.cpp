@@ -126,13 +126,22 @@ glm::mat4 scene::projection_matrix(XrFovf fov, float zn)
 	// reversed Z projection, infinite far plane
 
 	// clang-format off
-	return glm::mat4{
+	glm::mat4 proj = glm::mat4{
 		{ 2/(r-l),     0,            0,    0 },
 		{ 0,           2/(b-t),      0,    0 },
 		{ (l+r)/(r-l), (t+b)/(b-t),  0,   -1 },
 		{ 0,           0,            zn,   0 }
 	};
 	// clang-format on
+#if WIVRN_WAVE_RUNTIME
+	// The Wave compositor samples submitted textures OpenGL-style (v = 0 at
+	// the bottom) while Vulkan renders top-down, and it ignores the
+	// TextureParams UVs, so render the image bottom-up instead. The Y flip
+	// reverses triangle winding; scene_renderer::render compensates.
+	for (int col = 0; col < 4; ++col)
+		proj[col][1] = -proj[col][1];
+#endif
+	return proj;
 }
 
 glm::mat4 scene::view_matrix(XrPosef pose)
@@ -242,12 +251,112 @@ void scene::render_world(
 	        frames,
 	        render_debug_draws);
 
+#if WIVRN_WAVE_RUNTIME
+	// Remember the image just rendered so render_gui/render_overlay composite
+	// into it instead of submitting layers the shim would drop.
+	wave_target.color = color_image;
+	wave_target.layout = vk::ImageLayout::eColorAttachmentOptimal;
+	wave_target.extent = vk::Extent2D{width, height};
+	wave_target.space = space;
+	wave_target.frames.assign(frames.begin(), frames.end());
+#endif
+
 	add_projection_layer(
 	        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
 	        space,
 	        composition_layer_color,
 	        composition_layer_depth);
 }
+
+#if WIVRN_WAVE_RUNTIME
+void scene::set_wave_target(vk::Image color, vk::ImageLayout layout, vk::Extent2D extent, XrSpace space, std::span<XrView> views)
+{
+	wave_target.color = color;
+	wave_target.layout = layout;
+	wave_target.extent = extent;
+	wave_target.space = space;
+	wave_target.frames.clear();
+	for (const XrView & view: views)
+		wave_target.frames.push_back({
+		        .projection = projection_matrix(view.fov, constants::lobby::near_plane),
+		        .view = view_matrix(view.pose),
+		});
+}
+
+void scene::render_gui(vk::Image canvas, vk::Extent2D canvas_size, const std::vector<std::pair<int, XrCompositionLayerQuad>> & layers, XrTime time)
+{
+	if (wave_target.color == vk::Image{})
+		return;
+
+	std::vector<scene_renderer::gui_quad> quads;
+	quads.reserve(layers.size());
+	for (const auto & [z_index, q]: layers)
+	{
+		// The XR compositor transforms a layer into the reference space by
+		// composing the space-to-space transform with the layer pose
+		// expressed in its own space (the lobby renders in the height-offset
+		// space while the imgui layers live in the world space).
+		glm::vec3 position{q.pose.position.x, q.pose.position.y, q.pose.position.z};
+		glm::quat orientation{q.pose.orientation.w, q.pose.orientation.x, q.pose.orientation.y, q.pose.orientation.z};
+		if (q.space != wave_target.space)
+		{
+			auto location = application::locate_controller(q.space, wave_target.space, time);
+			if (not location)
+				continue;
+			glm::mat4 space_xform = glm::translate(glm::mat4(1), location->first) * glm::mat4_cast(location->second);
+			glm::mat4 pose_xform = glm::translate(glm::mat4(1), position) * glm::mat4_cast(orientation);
+			glm::mat4 composed = space_xform * pose_xform;
+			position = glm::vec3(composed[3]);
+			orientation = glm::quat_cast(composed);
+		}
+
+		glm::mat4 model = glm::translate(glm::mat4(1), position) *
+		                  glm::mat4_cast(orientation) *
+		                  glm::scale(glm::mat4(1), glm::vec3(q.size.width, q.size.height, 1.f));
+
+		quads.push_back(scene_renderer::gui_quad{
+		        .canvas = canvas,
+		        .src_rect = vk::Rect2D{
+		                .offset = {q.subImage.imageRect.offset.x, q.subImage.imageRect.offset.y},
+		                .extent = {
+		                        .width = (uint32_t)q.subImage.imageRect.extent.width,
+		                        .height = (uint32_t)q.subImage.imageRect.extent.height,
+		                },
+		        },
+		        .model = model,
+		});
+	}
+
+	renderer->render_gui(quads, wave_target.extent, swapchain_format, depth_format, wave_target.color, wave_target.layout, canvas_size, wave_target.frames);
+	wave_target.layout = vk::ImageLayout::eColorAttachmentOptimal;
+}
+
+void scene::render_overlay(uint32_t layer_mask, std::span<XrView> views)
+{
+	if (wave_target.color == vk::Image{})
+		return;
+
+	static uint64_t overlay_log_counter = 0;
+	if ((overlay_log_counter++ % 60) == 0)
+		spdlog::info("render_overlay: mask {}, {} views", layer_mask, wave_target.frames.size());
+	if (wave_target.frames.size() != views.size())
+		set_wave_target(wave_target.color, wave_target.layout, wave_target.extent, wave_target.space, views);
+
+	renderer->render(
+	        world,
+	        {0, 0, 0, 0},
+	        layer_mask,
+	        wave_target.extent,
+	        swapchain_format,
+	        depth_format,
+	        wave_target.color,
+	        vk::Image{},
+	        wave_target.frames,
+	        false,
+	        /*clear_color=*/false);
+	wave_target.layout = vk::ImageLayout::eColorAttachmentOptimal;
+}
+#endif
 
 xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size)
 {

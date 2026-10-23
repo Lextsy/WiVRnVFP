@@ -86,11 +86,11 @@ void main()
             in_weights.z * joints.joint_matrices[int(in_joints.z)] +
             in_weights.w * joints.joint_matrices[int(in_joints.w)];
 
-    gl_Position = mesh.modelviewproj[gl_ViewIndex] * skinMatrix * vec4(in_position, 1.0);
+    gl_Position = mesh.modelviewproj[wivrn_view] * skinMatrix * vec4(in_position, 1.0);
     vec4 world_position = mesh.model * skinMatrix * vec4(in_position, 1.0);
     vec4 base_position = mesh.model * skinMatrix * vec4(in_position.xy, 0.0, 1.0);
 #else // SKINNED
-    gl_Position = mesh.modelviewproj[gl_ViewIndex] * vec4(in_position, 1.0);
+    gl_Position = mesh.modelviewproj[wivrn_view] * vec4(in_position, 1.0);
     vec4 world_position = mesh.model * vec4(in_position, 1.0);
     vec4 base_position = mesh.model * vec4(in_position.xy, 0.0, 1.0);
 #endif // SKINNED

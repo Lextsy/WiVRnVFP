@@ -22,6 +22,7 @@
 #include <magic_enum.hpp>
 #include <spdlog/spdlog.h>
 #include <spirv_reflect.h>
+#include <stdexcept>
 #include <vulkan/vulkan_to_string.hpp>
 
 template <typename T, typename F>
@@ -83,7 +84,13 @@ std::shared_ptr<shader> shader_loader::operator()(std::span<const uint32_t> spir
 		spvReflectDestroyShaderModule(&reflect);
 	}
 	else
-		spdlog::error("Cannot reflect shader: {}", magic_enum::enum_name(result));
+	{
+		// Do not build a shader module from invalid SPIR-V: it yields empty
+		// inputs, which propagates as an empty vertex layout and crashes
+		// downstream. Fail fast with a descriptive error.
+		spdlog::error("Cannot reflect shader: {} ({} bytes, magic 0x{:08X})", magic_enum::enum_name(result), spirv.size_bytes(), spirv.empty() ? 0u : spirv[0]);
+		throw std::runtime_error("Cannot reflect shader: " + std::string(magic_enum::enum_name(result)));
+	}
 
 	return std::make_shared<shader>(vk::raii::ShaderModule{device, create_info}, inputs, specialization_constants);
 }

@@ -4,7 +4,7 @@
     android:installLocation="auto">
 
     <!-- https://developer.android.com/reference/android/content/pm/PackageManager#FEATURE_VULKAN_HARDWARE_VERSION -->
-   <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400000" android:required="true"/>
+   <uses-feature android:name="android.hardware.vulkan.version" android:version="0x10000" android:required="true"/>
    <!-- https://developer.android.com/reference/android/content/pm/PackageManager#FEATURE_VULKAN_HARDWARE_LEVEL -->
    <uses-feature android:name="android.hardware.vulkan.level" android:version="0" android:required="true"/>
 
@@ -69,8 +69,6 @@
     <uses-feature android:name="wave.feature.lipexpression" android:required="false" />
     <uses-feature android:name="wave.feature.tracker" android:required="false" />
 
-    <!-- See https://developer.android.com/develop/xr/get-started -->
-    <uses-feature android:name="android.software.xr.api.openxr" android:version="0x00010000" android:required="true" />
     <uses-feature android:name="android.hardware.xr.input.controller" android:required="false" />
     <uses-feature android:name="android.hardware.xr.input.hand_tracking" android:required="false" />
     <uses-feature android:name="android.hardware.xr.input.eye_tracking" android:required="false" />
@@ -98,6 +96,12 @@
         <!-- See https://hub.vive.com/storage/docs/en-us/ConfigureAppCapabilities.html -->
         <meta-data android:name="com.htc.vr.content.NumDoFHmd" android:value="6DoF"/>
         <meta-data android:name="com.htc.vr.content.NumDoFController" android:value="6DoF"/>
+        <!-- Wave "SDK version" is an API level, not a release number. Highest level used by
+             the WaveVR shim is 3 (WVR_VulkanInit, WVR_GetVkImage, WVR_SetInputRequest,
+             WVR_GetInputDeviceAnalogType); a value above the device runtime level makes the
+             Wave service refuse to start the app. -->
+        <meta-data android:name="minWaveSDKVersion" android:value="3" />
+        <meta-data android:name="com.htc.vr.content.NumController" android:value="2" />
 
         <meta-data android:name="handtracking" android:value="1" />
         <meta-data android:name="eyetracking_calibration" android:value="true" />
@@ -106,14 +110,6 @@
         <meta-data android:name="com.oculus.ossplash" android:value="true"/>
         <!-- https://developers.meta.com/horizon/documentation/native/android/mobile-passthrough-loading-screens -->
         <meta-data android:name="com.oculus.ossplash.background" android:value="passthrough-contextual"/>
-
-        <!-- https://developer.android.com/develop/xr/get-started#xr_activity_start_mode_full_space_unmanaged -->
-        <property
-            android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
-            android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
-        <property
-            android:name="android.window.PROPERTY_XR_BOUNDARY_TYPE_RECOMMENDED"
-            android:value="XR_BOUNDARY_TYPE_LARGE" />
 
         <!-- The activity is the built-in NativeActivity framework class. -->
         <!-- launchMode is set to singleTask because there should never be multiple copies of the app running. -->
@@ -126,13 +122,9 @@
             android:launchMode="singleTask"
             android:resizeableActivity="false"
             android:screenOrientation="landscape"
+            android:enableVrMode="@string/wvr_vr_mode_component"
             android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
             tools:ignore="NonResizeableActivity">
-
-            <!-- Tell NativeActivity the name of the .so -->
-            <meta-data
-                android:name="android.app.lib_name"
-                android:value="wivrn" />
 
 
             <!-- This filter lets the apk show up as a launchable icon. -->

@@ -962,6 +962,9 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	bool hide_right_controller = false;
 
 	std::optional<std::pair<glm::vec3, glm::quat>> head_position = application::locate_controller(application::space(xr::spaces::view), world_space, frame_state.predictedDisplayTime);
+	static uint64_t head_log_counter = 0;
+	if ((head_log_counter++ % 120) == 0)
+		spdlog::info("lobby head {}: {:.2f} {:.2f} {:.2f}", head_position ? "ok" : "FAIL", head_position ? head_position->first.x : 0.f, head_position ? head_position->first.y : 0.f, head_position ? head_position->first.z : 0.f);
 	std::optional<glm::vec3> new_gui_position;
 
 	if (head_position)
@@ -1043,7 +1046,9 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	}
 #endif
 
+
 	std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_layers = draw_gui(frame_state.predictedDisplayTime);
+
 
 #if WIVRN_CLIENT_DEBUG_MENU
 	if (auto * node = world.try_get<components::node>(debug_primitive_to_highlight.first);
@@ -1078,6 +1083,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 
 	world.get<components::node>(lobby_entity).visible = not application::get_config().passthrough_enabled;
 
+
 	render_start(application::get_config().passthrough_enabled, frame_state.predictedDisplayTime);
 
 	const XrColor4f clear_color = application::get_config().passthrough_enabled ? XrColor4f{0, 0, 0, 0} : constants::lobby::sky_color;
@@ -1091,7 +1097,22 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	        composition_layer_depth_test_supported ? layer_lobby | layer_controllers : layer_lobby,
 	        clear_color,
 	        true);
+#if WIVRN_WAVE_RUNTIME
+	// The shim drops quad layers: composite the GUI and the controller rays
+	// into the projection image rendered above, back to front.
+	std::vector<std::pair<int, XrCompositionLayerQuad>> below_tip, tip;
+	for (auto & [z_index, layer]: imgui_layers)
+	{
+		if (z_index < constants::lobby::zindex_recenter_tip)
+			below_tip.push_back({z_index, layer});
+		else if (z_index == constants::lobby::zindex_recenter_tip)
+			tip.push_back({z_index, layer});
+	}
 
+	render_gui(imgui_ctx->canvas_image(), imgui_ctx->canvas_size(), below_tip, frame_state.predictedDisplayTime);
+	render_overlay(layer_rays | layer_controllers, views);
+	render_gui(imgui_ctx->canvas_image(), imgui_ctx->canvas_size(), tip, frame_state.predictedDisplayTime);
+#else
 	if (composition_layer_depth_test_supported)
 		set_depth_test(true, XR_COMPARE_OP_ALWAYS_FB);
 
@@ -1124,8 +1145,10 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		if (z_index == constants::lobby::zindex_recenter_tip)
 			add_quad_layer(layer.layerFlags, layer.space, layer.eyeVisibility, layer.subImage, layer.pose, layer.size);
 	}
+#endif
 
 	render_end();
+
 
 #if WIVRN_FEATURE_RENDERDOC
 	renderdoc_end(*vk_instance);

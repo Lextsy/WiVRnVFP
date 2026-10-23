@@ -21,11 +21,28 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <string>
 #include <tuple>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+#endif
 #include <jni.h>
+#include <spdlog/spdlog.h>
 #include <type_traits>
+
+#ifdef __ANDROID__
+// Device API level, read from the system property. Reading it through JNI
+// (android.os.Build$VERSION.SDK_INT) aborts the process on API < 26 when the field is accessed
+// from a thread that did not load the class, so native code must not depend on JNI for this.
+inline int android_api_level()
+{
+	char value[PROP_VALUE_MAX];
+	__system_property_get("ro.build.version.sdk", value);
+	return std::atoi(value);
+}
+#endif
 
 namespace jni
 {
@@ -55,6 +72,33 @@ public:
 		return *res;
 	}
 
+	// The VM of this process, recorded whenever a thread is attached with an explicit
+	// JavaVM pointer (the main thread does that at startup).
+	static JavaVM *& process_vm()
+	{
+		static JavaVM * vm = nullptr;
+		return vm;
+	}
+
+	// Attach the calling thread to the process VM. Callers that have no JavaVM/JNIEnv at
+	// hand (render threads, worker threads) use this; setup_thread(nullptr) would be
+	// ambiguous between the pointer overloads below.
+	static void setup_thread()
+	{
+		auto & inst = instance();
+		if (inst.jni_env)
+			return;
+
+		JavaVM * vm = process_vm();
+		if (not vm)
+		{
+			spdlog::warn("Cannot attach thread to the JVM: no VM recorded in this process");
+			return;
+		}
+
+		setup_thread(vm);
+	}
+
 	static void setup_thread(JavaVM * vm)
 	{
 		auto & inst = instance();
@@ -62,12 +106,16 @@ public:
 			return;
 		inst.vm = vm;
 		inst.vm->AttachCurrentThread(&inst.jni_env, nullptr);
+		process_vm() = vm;
 	}
 
 	static void setup_thread(JNIEnv * env)
 	{
 		auto & inst = instance();
 		inst.jni_env = env;
+		JavaVM * vm = nullptr;
+		env->GetJavaVM(&vm);
+		process_vm() = vm;
 	}
 
 	static void detach()
@@ -419,6 +467,26 @@ struct array
 	auto handle() const
 	{
 		return self.get();
+	}
+
+	array(jobject a)
+	{
+		auto & env = jni_thread::env();
+		if (a)
+			self.reset((jobjectArray)env.NewGlobalRef(a));
+	}
+
+	constexpr static auto call_method = &_JNIEnv::CallObjectMethod;
+	constexpr static auto call_static_method = &_JNIEnv::CallStaticObjectMethod;
+
+	size_t size() const
+	{
+		return self ? size_t(jni_thread::env().GetArrayLength(self.get())) : 0;
+	}
+
+	auto operator[](size_t index) const
+	{
+		return T(jni_thread::env().GetObjectArrayElement(self.get(), jsize(index)));
 	}
 
 	array(T & element)

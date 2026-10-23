@@ -1132,6 +1132,12 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 		}
 	}
 
+#if WIVRN_WAVE_RUNTIME
+	// The shim drops quad layers: composite the GUI into the projection image
+	// set by set_wave_target. The alpha fade-out (scale-bias path) has no
+	// equivalent here; the GUI is composited at full opacity.
+	render_gui(imgui_ctx->canvas_image(), imgui_ctx->canvas_size(), layers, predicted_display_time);
+#else
 	for (auto [_, layer]: layers)
 	{
 		add_quad_layer(layer.layerFlags, layer.space, layer.eyeVisibility, layer.subImage, layer.pose, layer.size);
@@ -1141,10 +1147,14 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 		else if (alpha < 1 and composition_layer_color_scale_bias_supported)
 			set_color_scale_bias({alpha, alpha, alpha, alpha}, {});
 	}
+#endif
 
 	// Display the controller rays
 	if (interactable)
 	{
+#if WIVRN_WAVE_RUNTIME
+		render_overlay(layer_controllers | layer_rays, views);
+#else
 		render_world(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
 		             world_space,
 		             views,
@@ -1155,5 +1165,6 @@ void scenes::stream::draw_gui(XrTime predicted_display_time, XrDuration predicte
 		             {});
 		if (composition_layer_depth_test_supported)
 			set_depth_test(true, XR_COMPARE_OP_LESS_FB);
+#endif
 	}
 }

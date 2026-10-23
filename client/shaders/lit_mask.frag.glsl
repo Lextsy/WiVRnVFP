@@ -30,6 +30,7 @@ layout(location = 0) out vec4 out_color;
 
 void main()
 {
+    wivrn_force_bindings();
     vec4 albedo = vertex_color * material.base_color_factor * texture(base_color_texture, texcoord_base_color);
     vec3 emissive_color = (material.base_emissive_factor * texture(emissive_texture, texcoord_emissive)).rgb;
 

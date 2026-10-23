@@ -20,7 +20,7 @@
 #pragma once
 
 #ifdef XR_USE_PLATFORM_ANDROID
-#include <android_native_app_glue.h>
+#include <jni.h>
 #endif
 
 #include "utils/handle.h"

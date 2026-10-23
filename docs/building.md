@@ -107,6 +107,11 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk/
 
 Outputs will be in `build/outputs/apk/release/WiVRn-release.apk`
 
+#### WaveVR headsets (Vive Focus Plus)
+
+Building for Wave 1 headsets needs the proprietary WaveVR SDK and a one-time device
+setting: see [WaveVR backend](wave.md).
+
 #### Install apk with adb
 Before using adb you must enable usb debugging on your device:
  * Pico - https://developer.picoxr.com/document/unity-openxr/set-up-the-development-environment/ (see first step)

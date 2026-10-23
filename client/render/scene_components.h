@@ -179,6 +179,9 @@ struct node
 	bool global_visible;
 	bool reverse_side;
 	uint32_t global_layer_mask;
+	// Frame stamp of the last scene_renderer::start_frame that computed this
+	// node's transform_to_root (see scene_renderer::render)
+	uint64_t transform_stamp = 0;
 };
 
 struct animation_track_base

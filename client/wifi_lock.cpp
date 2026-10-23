@@ -32,15 +32,18 @@ wifi_lock::wifi_lock(decltype(multicast_) m, decltype(wifi_) w) :
 
 std::shared_ptr<wifi_lock> wifi_lock::make_wifi_lock(jobject activity)
 {
-	jni::object<""> act(application::native_app()->activity->clazz);
+	jni::object<""> act(application::activity());
 
 	jni::string lock_name("WiVRn");
 
-	static int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+	static int api_level = android_api_level();
 
 	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
 	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
-	auto wifi_service_id = ctx.klass().field<jni::string>("WIFI_SERVICE");
+	// WIFI_SERVICE is a static field of android.content.Context. The application context object is
+	// an android.app.Application instance, so reading the field through its runtime class makes
+	// CheckJNI abort ("static jfieldID not valid for class ..."). Use the declaring class instead.
+	auto wifi_service_id = jni::klass("android/content/Context").field<jni::string>("WIFI_SERVICE");
 	auto system_service = ctx.call<jni::object<"java/lang/Object">>("getSystemService", wifi_service_id);
 	return std::shared_ptr<wifi_lock>(new wifi_lock(
 	        system_service.call<jni::object<"android/net/wifi/WifiManager$MulticastLock">>("createMulticastLock", lock_name),

@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <boost/locale.hpp>
 #include <boost/url/parse.hpp>
+#include <boost/url/parse_query.hpp>
 #include <chrono>
 #include <cstring>
 #include <ctype.h>
@@ -839,7 +840,10 @@ std::string parse_driver_sersion(const vk::PhysicalDeviceProperties & p)
 void application::initialize_vulkan()
 {
 	auto graphics_requirements = xr_system_id.graphics_requirements();
-	XrVersion vulkan_version = std::max(app_info.min_vulkan_version, graphics_requirements.minApiVersionSupported);
+	// The reduced-feature path (no multiview, no YCbCr sampling, no push descriptors)
+	// runs on Vulkan 1.0; see hmd_traits::supports_multiview
+	XrVersion app_min_vulkan_version = get_hmd_traits().supports_multiview ? app_info.min_vulkan_version : XR_API_VERSION_1_0;
+	XrVersion vulkan_version = std::max(app_min_vulkan_version, graphics_requirements.minApiVersionSupported);
 	spdlog::info("OpenXR runtime wants Vulkan {}", xr::to_string(graphics_requirements.minApiVersionSupported));
 	spdlog::info("Requesting Vulkan {}", xr::to_string(vulkan_version));
 
@@ -892,9 +896,13 @@ void application::initialize_vulkan()
 #endif
 	}
 
-	vk_device_extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
-	vk_device_extensions.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
-	vk_device_extensions.push_back(VK_KHR_MULTIVIEW_EXTENSION_NAME);
+	const auto & device_traits = get_hmd_traits();
+	if (device_traits.supports_push_descriptors)
+		vk_device_extensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+	if (device_traits.supports_ycbcr_conversion)
+		vk_device_extensions.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+	if (device_traits.supports_multiview)
+		vk_device_extensions.push_back(VK_KHR_MULTIVIEW_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_IMG_FILTER_CUBIC_EXTENSION_NAME);
 	optional_device_extensions.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
@@ -909,9 +917,14 @@ void application::initialize_vulkan()
 #endif
 
 #ifdef __ANDROID__
-	vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+	// AHardwareBuffer import and the foreign queue family are API 26+ / Vulkan 1.1 features
+	if (device_traits.supports_android_hardware_buffer)
+	{
+		vk_device_extensions.push_back(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+		vk_device_extensions.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
+	}
+	// Vulkan 1.0 KHR extensions: available on Adreno 540
 	vk_device_extensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
-	vk_device_extensions.push_back(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME);
 	vk_device_extensions.push_back(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
 	vk_device_extensions.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
 	vk_device_extensions.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
@@ -1074,6 +1087,8 @@ void application::initialize_vulkan()
 
 	check_feature_flag(&vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::timelineSemaphore, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
 	check_feature_flag(&vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::indexTypeUint8, VK_EXT_INDEX_TYPE_UINT8_EXTENSION_NAME);
+	check_feature_flag(&vk::PhysicalDeviceSamplerYcbcrConversionFeaturesKHR::samplerYcbcrConversion, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+	check_feature_flag(&vk::PhysicalDeviceMultiviewFeaturesKHR::multiview, VK_KHR_MULTIVIEW_EXTENSION_NAME);
 
 	vk_device = xr_system_id.create_device(vk_physical_device, device_create_info.get());
 	*vk_queue.lock() = vk_device.getQueue(vk_queue_family_index, 0);
@@ -1095,9 +1110,16 @@ void application::initialize_vulkan()
 
 	pipeline_cache = vk::raii::PipelineCache(vk_device, pipeline_cache_info);
 
+	// VMA_DYNAMIC_VULKAN_FUNCTIONS (forced on Android) requires the two
+	// proc-address entry points; VMA fetches the rest itself.
+	VmaVulkanFunctions vma_vulkan_functions{
+	        .vkGetInstanceProcAddr = &vkGetInstanceProcAddr,
+	        .vkGetDeviceProcAddr = &vkGetDeviceProcAddr,
+	};
 	allocator.emplace(VmaAllocatorCreateInfo{
 	                          .physicalDevice = *vk_physical_device,
 	                          .device = *vk_device,
+	                          .pVulkanFunctions = &vma_vulkan_functions,
 	                          .instance = *vk_instance,
 	                  },
 #ifndef NDEBUG
@@ -1410,7 +1432,7 @@ void application::initialize()
 
 #ifdef __ANDROID__
 	xr_instance =
-	        xr::instance(app_info.name, app_info.native_app->activity->vm, app_info.native_app->activity->clazz, xr_extensions);
+	        xr::instance(app_info.name, app_info.vm, app_info.activity, xr_extensions);
 #else
 	xr_instance = xr::instance(app_info.name, xr_extensions);
 #endif
@@ -1597,13 +1619,26 @@ void application::set_server_uri(std::string uri)
 
 	{
 		std::unique_lock _{server_intent_mutex};
+
+		std::string pin = parse_result->password();
+		if (pin.empty() && parse_result->has_query())
+		{
+			auto params = boost::urls::parse_query(parse_result->query());
+			if (!params.has_error())
+			{
+				auto it = params->find("pin");
+				if (it != params->end())
+					pin = std::string(it->value);
+			}
+		}
+
 		server_intent =
 		        wivrn_discover::service{
 		                .name = "",
 		                .hostname = parse_result->host(),
 		                .port = parse_result->has_port() ? parse_result->port_number() : wivrn::default_port,
 		                .tcp_only = is_tcp_scheme(parse_result->scheme()),
-		                .pin = parse_result->password(),
+		                .pin = pin,
 		        };
 	}
 }
@@ -1617,7 +1652,7 @@ application::application(application_info info) :
 
 	setup_jni();
 	{
-		jni::object<""> act(app_info.native_app->activity->clazz);
+		jni::object<""> act(app_info.activity);
 		auto app = act.call<jni::object<"android/app/Application">>("getApplication");
 		auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
 
@@ -1644,56 +1679,7 @@ application::application(application_info info) :
 		}
 	}
 
-	app_info.native_app->userData = this;
-	app_info.native_app->onAppCmd = [](android_app * app, int32_t cmd) {
-		switch (cmd)
-		{
-			// There is no APP_CMD_CREATE. The ANativeActivity creates the
-			// application thread from onCreate(). The application thread
-			// then calls android_main().
-			case APP_CMD_START:
-				break;
-			case APP_CMD_RESUME:
-				static_cast<application *>(app->userData)->resumed = true;
-				break;
-			case APP_CMD_PAUSE:
-				static_cast<application *>(app->userData)->resumed = false;
-				break;
-			case APP_CMD_STOP:
-				break;
-			case APP_CMD_DESTROY:
-				static_cast<application *>(app->userData)->native_window = nullptr;
-				break;
-			case APP_CMD_INIT_WINDOW:
-				static_cast<application *>(app->userData)->native_window = app->window;
-				break;
-			case APP_CMD_TERM_WINDOW:
-				static_cast<application *>(app->userData)->native_window = nullptr;
-				break;
-		}
-	};
-
-	// capture pointer to receive relative mouse events
-	app_info.native_app->activity->callbacks->onWindowFocusChanged = [](ANativeActivity * activity, int has_focus) {
-		if (has_focus)
-			android_hid::request_pointer_capture(activity);
-		else
-			android_hid::release_pointer_capture(activity);
-	};
-
-	app_info.native_app->onInputEvent = [](android_app * app, AInputEvent * event) {
-		auto app_instance = static_cast<application *>(app->userData);
-
-		std::unique_lock _{app_instance->scene_stack_lock};
-		if (!app_instance->scene_stack.empty())
-		{
-			auto scene = app_instance->scene_stack.back();
-			return app_instance->input_handler.handle_input(scene.get(), event) ? 1 : 0;
-		}
-		return 0;
-	};
-
-	wifi = wifi_lock::make_wifi_lock(app_info.native_app->activity->clazz);
+	wifi = wifi_lock::make_wifi_lock(app_info.activity);
 
 	// Initialize the loader for this platform
 	PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
@@ -1702,8 +1688,8 @@ application::application(application_info info) :
 		XrLoaderInitInfoAndroidKHR loaderInitInfoAndroid{
 		        .type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR,
 		        .next = nullptr,
-		        .applicationVM = app_info.native_app->activity->vm,
-		        .applicationContext = app_info.native_app->activity->clazz,
+		        .applicationVM = app_info.vm,
+		        .applicationContext = app_info.activity,
 		};
 		initializeLoader((const XrLoaderInitInfoBaseHeaderKHR *)&loaderInitInfoAndroid);
 	}
@@ -1734,7 +1720,7 @@ application::application(application_info info) :
 #ifdef __ANDROID__
 void application::setup_jni()
 {
-	jni::jni_thread::setup_thread(app_info.native_app->activity->vm);
+	jni::jni_thread::setup_thread(app_info.vm);
 }
 #endif
 
@@ -1755,9 +1741,6 @@ void application::cleanup()
 
 #ifdef __ANDROID__
 	jni::jni_thread::detach();
-	app_info.native_app->onAppCmd = nullptr;
-	app_info.native_app->onInputEvent = nullptr;
-	app_info.native_app->userData = nullptr;
 #endif
 }
 
@@ -1820,55 +1803,33 @@ void application::loop()
 #ifdef __ANDROID__
 void application::run()
 {
-	auto application_thread = utils::named_thread("application_thread", [&]() {
-		setup_jni();
+	// The Wave runtime invokes the registered main (wave_main → real_main → run)
+	// on its VRThread. Wave requires the render/submit calls (WVR_RenderInit,
+	// WVR_SubmitFrame, the Vulkan context) to run on that same thread, as the
+	// official sample does. Run the render loop here instead of on a worker
+	// thread; exit is relayed through request_exit() from the VRActivity
+	// onDestroy() JNI callback (waveDestroy) and observed by the loop.
+	setup_jni();
 
-		while (!is_exit_requested())
-		{
-			try
-			{
-				loop();
-			}
-			catch (std::exception & e)
-			{
-				spdlog::error("Caught exception in application_thread: \"{}\"", e.what());
-				exit_requested = true;
-			}
-			catch (...)
-			{
-				spdlog::error("Caught unknown exception in application_thread");
-				exit_requested = true;
-			}
-		}
-		spdlog::info("Exiting application_thread");
-	});
-
-	// Read all pending events.
-	while (!exit_requested)
+	while (!is_exit_requested())
 	{
-		int events;
-		struct android_poll_source * source;
-
-		// TODO signal with a file descriptor instead of a 100ms timeout
-		while (ALooper_pollOnce(100, nullptr, &events, (void **)&source) >= 0)
+		try
 		{
-			// Process this event.
-			if (source == nullptr)
-				continue;
-
-			source->process(app_info.native_app, source);
+			loop();
 		}
-
-		if (app_info.native_app->destroyRequested)
+		catch (std::exception & e)
 		{
-			spdlog::info("app_info.native_app->destroyRequested is true");
-			exit_requested = true;
+			spdlog::error("Caught exception: \"{}\"", e.what());
+			request_exit();
+		}
+		catch (...)
+		{
+			spdlog::error("Caught unknown exception");
+			request_exit();
 		}
 	}
 
 	spdlog::info("Exiting normally");
-
-	application_thread.join();
 }
 #else
 void application::run()
@@ -1911,7 +1872,7 @@ void application::push_scene(std::shared_ptr<scene> s)
 #ifdef __ANDROID__
 void application::set_usb_networking(bool enabled)
 {
-	jni::object<""> act(app_info.native_app->activity->clazz);
+	jni::object<""> act(app_info.activity);
 	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
 	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
 	auto system_service = ctx.call<jni::object<"java/lang/Object">>("getSystemService", jni::string("connectivity"));

@@ -169,6 +169,9 @@ private:
 	thread_safe<std::optional<gui_toast>> gui_toast;
 	std::atomic<XrTime> gui_status_last_change;
 
+	// Render-thread counter for the throttled blit diagnostic in render().
+	uint64_t blit_counter = 0;
+
 	thread_safe<std::queue<std::string>> stream_error_queue;
 
 	XrAction plots_toggle_1 = XR_NULL_HANDLE;

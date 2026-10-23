@@ -1,8 +1,17 @@
-find_package(Gettext REQUIRED)
+if(ANDROID)
+    find_package(Gettext QUIET)
+else()
+    find_package(Gettext REQUIRED)
+endif()
 
 function(CREATE_MO_FILES TARGET_NAME I18N_DOMAIN LOCALE_DIR)
 	# .po files are located in: ${LOCALE_DIR}/${LANG}/${I18N_DOMAIN}.po
 	# for every supported language
+
+	if(NOT GETTEXT_MSGFMT_EXECUTABLE)
+		message(STATUS "msgfmt not found: skipping ${I18N_DOMAIN} translations (Boost.Locale falls back to the source strings)")
+		return()
+	endif()
 
 	set(MO_FILES)
 	file(GLOB PO_FILES CONFIGURE_DEPENDS "${LOCALE_DIR}/*/${I18N_DOMAIN}.po")

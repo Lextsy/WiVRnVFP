@@ -105,11 +105,12 @@ android {
     defaultConfig {
         applicationId "org.meumeu.wivrn"
         // Vive Focus Plus runs Android 7.1.2 (API 25)
-        // Hardware buffer APIs (AImage_getHardwareBuffer, android/font.h) require API 26
-        // We use runtime checks to provide fallback code paths for API 25
+        // AAudio/AHardwareBuffer require API 26 and AFontMatcher API 29; runtime checks
+        // provide fallback code paths for API 25
         minSdkVersion 25
         compileSdkVersion 34
-        targetSdkVersion 32 // for Oculus Store
+        // Wave VR 3.x requires targetSdk <= 26 (Wave 4.x+ needs 29, unusable on API 25)
+        targetSdkVersion 26
 
         versionName = project.hasProperty('wivrn_version') ? wivrn_version : "1.0"
         versionCode = project.hasProperty('wivrn_versionCode') ? wivrn_versionCode.toInteger() : 1
@@ -117,6 +118,15 @@ android {
         def showDebugMenu = project.hasProperty('wivrn_show_debug_menu') ? wivrn_show_debug_menu : 'OFF'
         def compressGlb = project.hasProperty('wivrn_compress_glb') ? wivrn_compress_glb : 'OFF'
         def fetchcontentBaseDir = project.hasProperty('fetchcontent_base_dir') ? ['-DFETCHCONTENT_BASE_DIR=' + fetchcontent_base_dir] : []
+        def opensslDir = project.hasProperty('openssl_prebuilt_dir') ? file(openssl_prebuilt_dir) : file("$rootDir/openssl-prebuilt")
+        def opensslPrebuilt = new File(opensslDir, "lib/libcrypto.so").exists() ? ['-DWIVRN_OPENSSL_PREBUILT=' + opensslDir.absolutePath] : []
+        // AGP hands CMake a backslashed ANDROID_NDK; openxr_loader globs
+        // ${ANDROID_NDK}/shader-tools with CONFIGURE_DEPENDS, and CMake writes that pattern
+        // verbatim into VerifyGlobs.cmake, where "\U" is an invalid escape. Override the cache
+        // entry with forward slashes (last -D wins).
+        def ndkDir = new File(android.sdkDirectory, "ndk/${ndkVersion}")
+        def androidNdkArg = ndkDir.exists() ? ['-DANDROID_NDK=' + ndkDir.absolutePath.replace('\\', '/')] : []
+        def projectIncludeArg = ['-DCMAKE_PROJECT_INCLUDE=' + file('client/android/fix_ndk_path.cmake').absolutePath.replace('\\', '/')]
 
         def asan = use_asan ? 'ON': 'OFF'
         def stl = use_asan ? 'c++_shared' : "c++_static"
@@ -146,8 +156,12 @@ android {
                           '-DWIVRN_CSS=' + css,
                           '-DWIVRN_COMPRESS_GLB=' + compressGlb,
                           '-DWIVRN_ADDRESS_SANITIZER=' + asan,
+                          '-DWIVRN_WAVE_RUNTIME=ON',
                           ] +
-                          fetchcontentBaseDir
+                          fetchcontentBaseDir +
+                          opensslPrebuilt +
+                          androidNdkArg +
+                          projectIncludeArg
                 resValue "string", "app_name", project.hasProperty('wivrn_app_name') ? project.wivrn_app_name : "WiVRn Local"
                 abiFilters 'arm64-v8a'//, 'x86_64'
             }
@@ -241,21 +255,47 @@ android {
             resources.srcDirs = [layout.buildDirectory.dir('resources')]
 
             assets.srcDirs = ['assets', layout.buildDirectory.dir("assets")]
+            jniLibs.srcDirs = ['jniLibs']
         }
     }
 
     externalNativeBuild {
         cmake {
-            version = '4.2.3'
+            version = '4.1.2'
             path    'CMakeLists.txt'
         }
     }
 
     tasks["preBuild"].dependsOn "generatePngs"
 
+    // The WaveVR Java SDK (wvr_client.aar) is HTC's proprietary WaveVR client
+    // library and is not redistributable, so it is consumed from a local Wave SDK
+    // checkout at build time: -Pwave_sdk_dir=<Wave SDK root> (the aar lives in
+    // <wave_sdk_dir>/libs/). It provides the com.htc.vr.* classes the HTC VR
+    // framework reflects into (BuildConfig, VRActivityDecorator, VRJniBridge) and
+    // the native runtime closure (libwvr_api/libwvr_runtime/libvrcore/libvr_jni/
+    // ...) that the framework's JNI bridge dlopen's. Without it the framework
+    // logs "App VR SDK Version: null" and never invokes the registered main.
+    // Consumed in the dependencies block below.
+
     applicationVariants.all { variant ->
         // It probably works with merge${variant.name.capitalize()}Assets too
         tasks["generate${variant.name.capitalize()}Assets"].dependsOn "externalNativeBuild${variant.name.capitalize()}"
         tasks["merge${variant.name.capitalize()}Resources"].dependsOn "externalNativeBuild${variant.name.capitalize()}"
+    }
+}
+
+// WaveVR Java SDK: flatDir repo + aar dependency, sourced from the same
+// -Pwave_sdk_dir checkout as the native stub. Gated on the property so a
+// Wave-less build (no wave_sdk_dir) stays clean.
+repositories {
+    if (project.hasProperty('wave_sdk_dir')) {
+        flatDir { dirs new File(wave_sdk_dir, "libs") }
+    }
+}
+
+dependencies {
+    if (project.hasProperty('wave_sdk_dir')) {
+        implementation "com.htc.vr.aar:wvr_client@aar"
     }
 }

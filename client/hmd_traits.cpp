@@ -40,23 +40,19 @@
 #include <spdlog/spdlog.h>
 
 #ifdef __ANDROID__
-#include "utils/wrap_lambda.h"
 
 #include <sys/system_properties.h>
 
 static std::optional<std::string> get_property(const char * property)
 {
-	auto info = __system_property_find(property);
+	const prop_info * info = __system_property_find(property);
 	if (not info)
 		return std::nullopt;
 
-	std::string result;
-	wrap_lambda cb = [&result](const char * name, const char * value, uint32_t serial) {
-		result = value;
-	};
-
-	__system_property_read_callback(info, cb.userdata_first(), cb);
-	return result;
+	// __system_property_read_callback is API 26; AGP compiles native code for API 24 here.
+	char value[PROP_VALUE_MAX];
+	__system_property_read(info, nullptr, value);
+	return std::string(value);
 }
 #endif
 
@@ -302,6 +298,27 @@ void hmd_traits::init()
 
 		if (model == "VIVE Focus Vision")
 			panel_width_override = 2448;
+
+		if (model == "Vive Focus Plus" or model == "VIVE Focus Plus" or model == "VFP")
+		{
+			// ro.product.model is "Vive Focus Plus"; 2 x 1440 x 1600 OLED panels
+			panel_width_override = 1440;
+			// Adreno 540 driver is Vulkan 1.0 on Android 7: the reduced-feature render
+			// path and the CPU video upload path must be used
+			supports_multiview = false;
+			supports_ycbcr_conversion = false;
+			supports_android_hardware_buffer = false;
+			supports_push_descriptors = false;
+			// The Wave shim has no double-xrBeginFrame discard support, so declaring
+			// discard_frame would let stream::render skip reprojection and submission
+			// whenever every blitted frame was already displayed twice - Wave then
+			// composites nothing. Submit every frame instead.
+			discard_frame = false;
+			// The Focus Plus wand has a touchpad, a thumbstick, trigger, grip and menu.
+			// htc-vive-focus-3 (set above for every HTC device) is the profile WiVRn
+			// matches, and its trigger/thumbstick/squeeze/grip/menu sub-actions all map
+			// onto Wave input ids.
+		}
 
 		if (model == "VIVE XR Series")
 			panel_width_override = 1920;

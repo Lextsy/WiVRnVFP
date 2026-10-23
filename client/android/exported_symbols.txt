@@ -1,7 +1,5 @@
 LIBAPP {
 	global:
-		ANativeActivity_onCreate;
-		android_main;
 		Java_org_meumeu_wivrn*;
 	local:
 		*;

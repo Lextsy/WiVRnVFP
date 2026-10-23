@@ -18,6 +18,7 @@
  */
 
 #include "android_decoder.h"
+#include "android/jnipp.h"
 #include "application.h"
 #include "scenes/stream.h"
 #include "utils/named_thread.h"
@@ -115,19 +116,27 @@ decoder::decoder(
 
 	auto width = description.width;
 	auto height = description.height / (stream_index == 2 ? 2 : 1);
-	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+	int api_level = android_api_level();
 
 	AImageReader * ir;
-	media_status_t ir_status = AImageReader_new(width, height, AIMAGE_FORMAT_PRIVATE, 2, &ir);
+	// PRIVATE format gives GPU buffers that Vulkan can import directly (API 26+).
+	// Older APIs only expose CPU-accessible planes, so ask for YUV_420_888 and upload
+	// decoded frames manually.
+	// The CPU path copies each frame into a Vulkan linear image and the render thread
+	// holds the AImage (in the blit handle) until the frame's fence signals, so a
+	// 2-image budget saturates the reader: AImageReader_acquireLatestImage then fails
+	// with MediaCodec error -30002 and delivery stalls for ~1s, tripping the stall
+	// guard. 4 images matches the MediaCodec surface depth and decouples decode from
+	// the render thread's fence-hold.
+	cpu_decode_path = api_level < 26;
+	const int image_reader_max_images = api_level >= 26 ? 2 : 4;
+	media_status_t ir_status = AImageReader_new(width, height, api_level >= 26 ? AIMAGE_FORMAT_PRIVATE : AIMAGE_FORMAT_YUV_420_888, image_reader_max_images, &ir);
 	check(ir_status, "AImageReader_new");
 	image_reader.reset(ir, AImageReader_deleter{});
 
 	AImageReader_ImageListener listener{this, on_image_available};
 	check(AImageReader_setImageListener(ir, &listener), "AImageReader_setImageListener");
 
-	vkGetAndroidHardwareBufferPropertiesANDROID =
-	        application::get_vulkan_proc<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
-	                "vkGetAndroidHardwareBufferPropertiesANDROID");
 	{
 		AMediaFormat_ptr format(AMediaFormat_new());
 		AMediaFormat_setString(format.get(), AMEDIAFORMAT_KEY_MIME, mime(description.codec[stream_index]));
@@ -155,21 +164,69 @@ decoder::decoder(
 		        .onAsyncFormatChanged = decoder::on_media_format_changed,
 		        .onAsyncError = decoder::on_media_error,
 		};
-	#pragma clang diagnostic push
-	#pragma clang diagnostic ignored "-Wunreachable-code"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunreachable-code"
 #if __ANDROID_API__ >= 28
-	if (true) {
-		media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
-		check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
-	}
+		if (true)
+		{
+			media_status_t cb_status = AMediaCodec_setAsyncNotifyCallback(media_codec.get(), callback, this);
+			check(cb_status, "AMediaCodec_setAsyncNotifyCallback");
+		}
 #endif
-	#pragma clang diagnostic pop
+#pragma clang diagnostic pop
 
 		check(AMediaCodec_configure(media_codec.get(), format.get(), window, nullptr /* crypto */, 0 /* flags */),
 		      "AMediaCodec_configure");
 
 		check(AMediaCodec_start(media_codec.get()), "AMediaCodec_start");
 	}
+
+#if __ANDROID_API__ < 28
+		if (api_level < 28)
+		{
+			// AMediaCodec_setAsyncNotifyCallback is API 28+. Older releases get their
+			// input buffers dequeued here (push_data fills them) and their output
+			// buffers released here, which is what feeds the ImageReader surface.
+			pump_thread = std::thread([this, mc = media_codec.get()]() {
+				while (not pump_stop)
+				{
+					try
+					{
+						ssize_t idx = AMediaCodec_dequeueInputBuffer(mc, 10000);
+						if (idx >= 0)
+						{
+							size_t size = 0;
+							uint8_t * data = AMediaCodec_getInputBuffer(mc, idx, &size);
+							if (data)
+								input_buffers.push(input_buffer{
+								        .idx = int32_t(idx),
+								        .capacity = size,
+								        .data = data,
+								});
+						}
+
+						AMediaCodecBufferInfo info{};
+						ssize_t out = AMediaCodec_dequeueOutputBuffer(mc, &info, 10000);
+						if (out >= 0)
+						{
+							if (AMediaCodec_releaseOutputBuffer(mc, out, info.size != 0) != AMEDIA_OK)
+								spdlog::error("AMediaCodec_releaseOutputBuffer: MediaCodec error");
+							if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM)
+								break;
+						}
+						else if (out == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED)
+						{
+							spdlog::info("Mediacodec format changed");
+						}
+					}
+					catch (const utils::sync_queue_closed &)
+					{
+						return;
+					}
+				}
+			});
+		}
+#endif
 	worker = utils::named_thread(
 	        "decoder-" + std::to_string(stream_index),
 	        [this]() {
@@ -194,6 +251,7 @@ decoder::decoder(
 
 decoder::~decoder()
 {
+	pump_stop = true;
 	if (image_reader)
 		AImageReader_setImageListener(image_reader.get(), nullptr);
 	if (media_codec)
@@ -205,6 +263,9 @@ decoder::~decoder()
 	}
 	input_buffers.close();
 	jobs.close();
+
+	if (pump_thread.joinable())
+		pump_thread.join();
 
 	if (worker.joinable())
 		worker.join();
@@ -308,6 +369,15 @@ void decoder::on_image_available(AImageReader * reader)
 
 		auto vk_data = map_hardware_buffer(image.get());
 
+		// The CPU path copied the planes into a private Vulkan image; the reader
+		// buffer is free to recycle now. Holding the AImage in the blit handle
+		// (until the frame's fence signals) saturates the ImageReader budget:
+		// AImageReader_acquireLatestImage then fails with MediaCodec error -30002
+		// and delivery stalls for ~1s, tripping the stall guard. The PRIVATE path
+		// imports the hardware buffer, so its AImage must stay alive.
+		if (cpu_decode_path)
+			image.reset();
+
 		auto handle = std::make_shared<android_blit_handle>(
 		        info->feedback,
 		        info->view_info,
@@ -403,7 +473,7 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 {
 	std::unique_lock lock(hbm_mutex);
 
-	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+	int api_level = android_api_level();
 
 #if __ANDROID_API__ >= 28
 	if (api_level >= 28)
@@ -418,11 +488,16 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*hardware_buffer);
 #else
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunreachable-code"
 	if (false)
 	{
-		// API 28+: Use AImage_getHardwareBuffer with AHardwareBuffer_describe
+		// API < 28: never taken, this only keeps the shared code below compiling when
+		// AImage_getHardwareBuffer and AHardwareBuffer_describe are unavailable
+		AHardwareBuffer * hardware_buffer = nullptr;
 		AHardwareBuffer_Desc buffer_desc{};
 		auto [properties, format_properties] = device.getAndroidHardwareBufferPropertiesANDROID<vk::AndroidHardwareBufferPropertiesANDROID, vk::AndroidHardwareBufferFormatPropertiesANDROID>(*(AHardwareBuffer *)nullptr);
+#pragma clang diagnostic pop
 #endif
 		if (!*ycbcr_sampler || memcmp(&ahb_format, &format_properties, sizeof(format_properties)))
 		{
@@ -515,6 +590,28 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 	else
 	{
 		// API 25: Use AImage_getPlanes with manual buffer upload
+
+		// The defoveator passes decoder samplers as immutable samplers; the Adreno
+		// driver dereferences them while assigning pipeline-layout bindings, so a
+		// null sampler crashes in vkCreatePipelineLayout. The linear-image path
+		// below has no Ycbcr conversion, so create a plain sampler once.
+		if (!*plain_sampler)
+		{
+			plain_sampler = vk::raii::Sampler(device, vk::SamplerCreateInfo{
+			        .magFilter = vk::Filter::eLinear,
+			        .minFilter = vk::Filter::eLinear,
+			        .mipmapMode = vk::SamplerMipmapMode::eNearest,
+			        .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+			        .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+			        .addressModeW = vk::SamplerAddressMode::eClampToEdge,
+			        .anisotropyEnable = false,
+			        .maxAnisotropy = 1,
+			        .compareEnable = false,
+			        .minLod = 0,
+			        .maxLod = 0,
+			});
+			spdlog::info("Created plain sampler for API < 28 decode path");
+		}
 		int32_t format;
 		AImage_getFormat(image, &format);
 		int32_t width;
@@ -554,70 +651,81 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		// Convert from AImage planes to Vulkan image
 		void * mapped = nullptr;
 		VkResult map_result = vkMapMemory(*device, *memory, 0, mem_reqs.memoryRequirements.size, 0, &mapped);
-		if (map_result != VK_SUCCESS) {
+		if (map_result != VK_SUCCESS)
+		{
 			throw std::runtime_error("vkMapMemory failed");
 		}
-		uint8_t * dst = static_cast<uint8_t *>(mapped);
+		// Linear images have a driver-chosen row pitch, not width * bytes_per_pixel
+		vk::SubresourceLayout linear_layout = vimage.getSubresourceLayout(vk::ImageSubresource{
+		        vk::ImageAspectFlagBits::eColor,
+		        0,
+		        0});
+		uint8_t * dst = static_cast<uint8_t *>(mapped) + linear_layout.offset;
+		const size_t dst_row_pitch = linear_layout.rowPitch;
 
 		switch (format)
 		{
-			case AIMAGE_FORMAT_YUV_420_888:
-			{
+			case AIMAGE_FORMAT_YUV_420_888: {
 				// YUV420 planar
 				uint8_t * y_data = nullptr;
 				int y_data_length = 0;
 				check(AImage_getPlaneData(image, 0, &y_data, &y_data_length), "AImage_getPlaneData(0)");
+				int y_row_stride = 1;
+				check(AImage_getPlaneRowStride(image, 0, &y_row_stride), "AImage_getPlaneRowStride(0)");
 
 				uint8_t * u_data = nullptr;
 				int u_data_length = 0;
 				check(AImage_getPlaneData(image, 1, &u_data, &u_data_length), "AImage_getPlaneData(1)");
+				int u_row_stride = 1;
+				int u_pixel_stride = 1;
+				check(AImage_getPlaneRowStride(image, 1, &u_row_stride), "AImage_getPlaneRowStride(1)");
+				check(AImage_getPlanePixelStride(image, 1, &u_pixel_stride), "AImage_getPlanePixelStride(1)");
 
 				uint8_t * v_data = nullptr;
 				int v_data_length = 0;
 				check(AImage_getPlaneData(image, 2, &v_data, &v_data_length), "AImage_getPlaneData(2)");
+				int v_row_stride = 1;
+				int v_pixel_stride = 1;
+				check(AImage_getPlaneRowStride(image, 2, &v_row_stride), "AImage_getPlaneRowStride(2)");
+				check(AImage_getPlanePixelStride(image, 2, &v_pixel_stride), "AImage_getPlanePixelStride(2)");
 
-
-				// Simple YUV to RGB conversion (could be optimized)
+				// BT.601 conversion in fixed point (coefficients scaled by 1024)
 				for (uint32_t y = 0; y < height; y++)
 				{
+					const uint8_t * src_y = y_data + (size_t)y * y_row_stride;
+					const uint8_t * src_u = u_data + (size_t)(y >> 1) * u_row_stride;
+					const uint8_t * src_v = v_data + (size_t)(y >> 1) * v_row_stride;
+					uint8_t * out = dst + (size_t)y * dst_row_pitch;
+
 					for (uint32_t x = 0; x < width; x++)
 					{
-						int y_row_stride;
-						AImage_getPlaneRowStride(image, 0, &y_row_stride);
-						int Y = y_data[y * y_row_stride + x];
-						int u_row_stride;
-						AImage_getPlaneRowStride(image, 1, &u_row_stride);
-						int U = u_data[(y >> 1) * u_row_stride + (x >> 1)];
-						int v_row_stride;
-						AImage_getPlaneRowStride(image, 2, &v_row_stride);
-						int V = v_data[(y >> 1) * v_row_stride + (x >> 1)];
+						int Y = src_y[x];
+						int U = src_u[(x >> 1) * u_pixel_stride] - 128;
+						int V = src_v[(x >> 1) * v_pixel_stride] - 128;
 
-						// BT.601 conversion
-						int R = Y + 1.402f * (V - 128);
-						int G = Y - 0.344f * (U - 128) - 0.714f * (V - 128);
-						int B = Y + 1.772f * (U - 128);
+						int R = Y + ((1436 * V) >> 10);
+						int G = Y - ((352 * U + 731 * V) >> 10);
+						int B = Y + ((1815 * U) >> 10);
 
-						dst[(y * width + x) * 4 + 0] = std::clamp(B, 0, 255);
-						dst[(y * width + x) * 4 + 1] = std::clamp(G, 0, 255);
-						dst[(y * width + x) * 4 + 2] = std::clamp(R, 0, 255);
-						dst[(y * width + x) * 4 + 3] = 255;
+						out[0] = std::clamp(B, 0, 255);
+						out[1] = std::clamp(G, 0, 255);
+						out[2] = std::clamp(R, 0, 255);
+						out[3] = 255;
+						out += 4;
 					}
 				}
 				break;
 			}
-			default:
-			{
+			default: {
 				// RGBA
 				uint8_t * src = nullptr;
 				int src_length = 0;
 				check(AImage_getPlaneData(image, 0, &src, &src_length), "AImage_getPlaneData(0)");
-				int row_stride;
-				AImage_getPlaneRowStride(image, 0, &row_stride);
+				int row_stride = 1;
+				check(AImage_getPlaneRowStride(image, 0, &row_stride), "AImage_getPlaneRowStride(0)");
 
 				for (uint32_t y = 0; y < height; y++)
-				{
-					memcpy(dst + y * width * 4, src + y * row_stride, width * 4);
-				}
+					memcpy(dst + (size_t)y * dst_row_pitch, src + (size_t)y * row_stride, width * 4);
 				break;
 			}
 		}
@@ -625,18 +733,18 @@ std::shared_ptr<decoder::mapped_hardware_buffer> decoder::map_hardware_buffer(AI
 		vkUnmapMemory(*device, *memory);
 
 		vk::raii::ImageView image_view(device, vk::ImageViewCreateInfo{
-		        .image = *vimage,
-		        .viewType = vk::ImageViewType::e2D,
-		        .format = vk_format,
-		        .components = {vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eG, vk::ComponentSwizzle::eB, vk::ComponentSwizzle::eA},
-		        .subresourceRange = {
-		                .aspectMask = vk::ImageAspectFlagBits::eColor,
-		                .baseMipLevel = 0,
-		                .levelCount = 1,
-		                .baseArrayLayer = 0,
-		                .layerCount = 1,
-		        },
-		});
+		                                               .image = *vimage,
+		                                               .viewType = vk::ImageViewType::e2D,
+		                                               .format = vk_format,
+		                                               .components = {vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eG, vk::ComponentSwizzle::eB, vk::ComponentSwizzle::eA},
+		                                               .subresourceRange = {
+		                                                       .aspectMask = vk::ImageAspectFlagBits::eColor,
+		                                                       .baseMipLevel = 0,
+		                                                       .levelCount = 1,
+		                                                       .baseArrayLayer = 0,
+		                                                       .layerCount = 1,
+		                                               },
+		                                       });
 
 		auto handle = std::make_shared<mapped_hardware_buffer>();
 		handle->vimage = std::move(vimage);
@@ -694,23 +802,14 @@ void decoder::on_media_output_available(AMediaCodec * media_codec, void * userda
 	});
 }
 
-static bool hardware_accelerated(AMediaCodec * media_codec)
+static bool hardware_accelerated(AMediaCodec * media_codec, const char * mime_type)
 {
-	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
-
-	// MediaCodecInfo has isHardwareAccelerated, but this does not exist in NDK.
+#if __ANDROID_API__ >= 28
 	char * name = nullptr;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunreachable-code"
-	if (api_level >= 28) {
-		media_status_t name_status = AMediaCodec_getName(media_codec, &name);
-		check(name_status, "AMediaCodec_getName");
-	}
+	check(AMediaCodec_getName(media_codec, &name), "AMediaCodec_getName");
 	auto release = [&]() {
-		if (api_level >= 28)
-			AMediaCodec_releaseName(media_codec, name);
+		AMediaCodec_releaseName(media_codec, name);
 	};
-#pragma clang diagnostic pop
 	for (const char * prefix: {
 	             "OMX.google",
 	             "c2.android",
@@ -724,6 +823,45 @@ static bool hardware_accelerated(AMediaCodec * media_codec)
 	}
 	release();
 	return true;
+#else
+	// AMediaCodec_getName is API 28+ and MediaCodecList.getCodecInfoForType is API 29+.
+	// Enumerate the codec list (all API 21+) and match the implementation name the same
+	// way as above, so a missing method cannot abort the process on old devices.
+	auto codec_list = jni::new_object<"android/media/MediaCodecList">(jni::Int{1 /* MediaCodecList.ALL_CODECS */});
+	auto codec_infos = codec_list.call<jni::array<jni::object<"android/media/MediaCodecInfo">>>("getCodecInfos");
+	for (size_t i = 0; i < codec_infos.size(); ++i)
+	{
+		auto info = codec_infos[i];
+		if (not info || info.call<jni::Bool>("isEncoder"))
+			continue;
+
+		auto types = info.call<jni::array<jni::string>>("getSupportedTypes");
+		bool matches = false;
+		for (size_t t = 0; t < types.size(); ++t)
+		{
+			std::string type = types[t];
+			if (type == mime_type)
+			{
+				matches = true;
+				break;
+			}
+		}
+		if (not matches)
+			continue;
+
+		std::string name = info.call<jni::string>("getName");
+		for (const char * prefix: {
+		             "OMX.google",
+		             "c2.android",
+		     })
+			if (std::string_view(name).starts_with(prefix))
+				return false;
+		return true;
+	}
+
+	spdlog::warn("MediaCodecList has no decoder for {}", mime_type);
+	return false;
+#endif
 }
 
 void decoder::supported_codecs(std::vector<wivrn::video_codec> & result)
@@ -740,7 +878,7 @@ void decoder::supported_codecs(std::vector<wivrn::video_codec> & result)
 	{
 		AMediaCodec_ptr media_codec(AMediaCodec_createDecoderByType(mime(codec)));
 
-		bool supported = media_codec and hardware_accelerated(media_codec.get());
+		bool supported = media_codec and hardware_accelerated(media_codec.get(), mime(codec));
 		if (supported)
 			result.push_back(codec);
 

@@ -155,6 +155,18 @@ public:
 		glm::vec2 size;
 	};
 
+	// The canvas image holding the GUI drawn for the current frame (selected
+	// by new_frame), for compositing it into the projection image on runtimes
+	// without quad-layer support (Wave shim).
+	vk::Image canvas_image() const
+	{
+		return swapchain.image(image_index);
+	}
+
+	vk::Extent2D canvas_size() const
+	{
+		return size;
+	}
 private:
 	uint32_t queue_family_index;
 

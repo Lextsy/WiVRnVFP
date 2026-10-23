@@ -50,6 +50,11 @@ public:
 		assert(instance_ != nullptr);
 		return *reinterpret_cast<T *>(instance_);
 	}
+
+	static bool is_instance_created()
+	{
+		return instance_ != nullptr;
+	}
 };
 
 template <typename T>

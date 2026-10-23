@@ -192,6 +192,33 @@ protected:
 	        XrColor4f clear_color,
 	        bool render_debug_draws = false);
 
+#if WIVRN_WAVE_RUNTIME
+	// The Wave shim has no quad-layer presentation: the GUI and the ray
+	// overlay are composited into the projection image rendered by the last
+	// render_world call instead of being submitted as extra layers.
+	struct wave_target_state
+	{
+		vk::Image color = {};
+		vk::ImageLayout layout = vk::ImageLayout::eColorAttachmentOptimal;
+		vk::Extent2D extent = {};
+		XrSpace space = XR_NULL_HANDLE;
+		std::vector<scene_renderer::frame_info> frames;
+	};
+	wave_target_state wave_target;
+
+	// Composite the imgui windows onto the target image (z-ordered by the
+	// caller; pass the layers in back-to-front order). Poses in a space other
+	// than the target's are located at `time`, as the XR compositor would.
+	void render_gui(vk::Image canvas, vk::Extent2D canvas_size, const std::vector<std::pair<int, XrCompositionLayerQuad>> & quads, XrTime time);
+
+	// Draw the world overlay (controller rays) onto the target image.
+	void render_overlay(uint32_t layer_mask, std::span<XrView> views);
+
+	// Remember the projection image rendered by the last render_world so that
+	// later passes (GUI, overlay) composite into it.
+	void set_wave_target(vk::Image color, vk::ImageLayout layout, vk::Extent2D extent, XrSpace space, std::span<XrView> views);
+#endif
+
 	void set_color_scale_bias(XrColor4f scale, XrColor4f bias);
 	void set_depth_test(bool write, XrCompareOpFB op);
 	void set_layer_settings(XrCompositionLayerSettingsFlagsFB flags);

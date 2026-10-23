@@ -48,7 +48,7 @@ bool check_permission(const char * permission)
 	if (permissions.contains(permission))
 		return true;
 
-	jni::object<""> act(application::native_app()->activity->clazz);
+	jni::object<""> act(application::activity());
 	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
 	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
 
@@ -67,7 +67,7 @@ void request_permission(const char * permission, std::function<void(bool)> callb
 		return;
 	}
 
-	jni::object<""> act(application::native_app()->activity->clazz);
+	jni::object<""> act(application::activity());
 	auto app = act.call<jni::object<"android/app/Application">>("getApplication");
 	auto ctx = app.call<jni::object<"android/content/Context">>("getApplicationContext");
 

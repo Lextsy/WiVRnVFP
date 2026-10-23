@@ -22,6 +22,7 @@
 #include "decoder/decoder.h"
 #include "utils/sync_queue.h"
 #include "wivrn_packets.h"
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <span>
@@ -73,6 +74,7 @@ private:
 	vk::AndroidHardwareBufferFormatPropertiesANDROID ahb_format;
 	vk::raii::SamplerYcbcrConversion ycbcr_conversion = nullptr;
 	vk::raii::Sampler ycbcr_sampler = nullptr;
+	vk::raii::Sampler plain_sampler = nullptr; // API < 28: linear images need a plain sampler
 
 	std::mutex hbm_mutex;
 	std::shared_ptr<AImageReader> image_reader;
@@ -81,7 +83,9 @@ private:
 	std::weak_ptr<scenes::stream> weak_scene;
 	shard_accumulator * accumulator;
 
-	PFN_vkGetAndroidHardwareBufferPropertiesANDROID vkGetAndroidHardwareBufferPropertiesANDROID;
+	std::thread pump_thread; // API < 28: synchronous MediaCodec pump
+	bool cpu_decode_path = false; // API < 26: planes copied into a Vulkan image, AImage releasable
+	std::atomic<bool> pump_stop{false};
 
 	void on_image_available(AImageReader * reader);
 	static void on_image_available(void * context, AImageReader * reader);
@@ -135,7 +139,9 @@ public:
 
 	vk::Sampler sampler() override
 	{
-		return *ycbcr_sampler;
+		if (*ycbcr_sampler)
+			return *ycbcr_sampler;
+		return *plain_sampler;
 	}
 
 	static void supported_codecs(std::vector<wivrn::video_codec> &);

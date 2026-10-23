@@ -20,8 +20,8 @@
 #pragma once
 
 #ifdef __ANDROID__
-#include "android/hid.h"
-#include <android_native_app_glue.h>
+#include <android/asset_manager.h>
+#include <jni.h>
 #endif
 
 #include "configuration.h"
@@ -39,6 +39,7 @@
 #include <boost/locale/generator.hpp>
 #include <boost/locale/gnu_gettext.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -56,6 +57,8 @@ class scene;
 
 #ifdef __ANDROID__
 extern "C" void Java_org_meumeu_wivrn_MainActivity_onNewIntent(JNIEnv * env, jobject instance, jobject intent_obj);
+extern "C" void Java_org_meumeu_wivrn_MainActivity_initWave(JNIEnv * env, jobject instance);
+extern "C" void Java_org_meumeu_wivrn_MainActivity_waveDestroy(JNIEnv * env, jobject instance);
 #endif
 
 struct application_info
@@ -67,7 +70,9 @@ struct application_info
 	XrVersion min_vulkan_version = XR_MAKE_VERSION(1, 1, 0);
 
 #ifdef __ANDROID__
-	android_app * native_app;
+	JavaVM * vm = nullptr;
+	jobject activity = nullptr;
+	AAssetManager * asset_manager = nullptr;
 #endif
 };
 
@@ -81,12 +86,6 @@ private:
 #endif
 
 	application_info app_info;
-#ifdef __ANDROID__
-	ANativeWindow * native_window = nullptr;
-	bool resumed = false;
-
-	android_hid::input_handler input_handler{};
-#endif
 
 	static inline const char engine_name[] = "No engine";
 	static inline const int engine_version = VK_MAKE_VERSION(1, 0, 0);
@@ -142,6 +141,11 @@ private:
 	bool debug_extensions_found = false;
 	std::vector<const char *> vk_device_extensions;
 	std::atomic<bool> exit_requested = false;
+	// Signalled whenever exit_requested becomes true. The render loop runs on the
+	// Wave VRThread and polls exit_requested each iteration; request_exit() is
+	// relayed from the VRActivity onDestroy() JNI callback (waveDestroy).
+	std::mutex exit_mutex;
+	std::condition_variable exit_cv;
 	std::filesystem::path config_path;
 	std::filesystem::path cache_path;
 
@@ -200,17 +204,17 @@ public:
 
 	static AAssetManager * asset_manager()
 	{
-		return instance().app_info.native_app->activity->assetManager;
+		return instance().app_info.asset_manager;
 	}
 
-	static android_app * native_app()
+	static jobject activity()
 	{
-		return instance().app_info.native_app;
+		return instance().app_info.activity;
 	}
 
-	static android_hid::input_handler & get_input_handler()
+	static JavaVM * vm()
 	{
-		return instance().input_handler;
+		return instance().app_info.vm;
 	}
 #endif
 
@@ -234,6 +238,14 @@ public:
 		return instance().exit_requested;
 	};
 
+	// Called from the native-activity thread when the glue reports destroyRequested.
+	static void request_exit()
+	{
+		instance().exit_requested = true;
+		std::scoped_lock lock{instance().exit_mutex};
+		instance().exit_cv.notify_all();
+	}
+
 	static void poll_actions();
 	static std::optional<std::pair<XrTime, float>> read_action_float(XrAction action);
 	static std::optional<std::pair<XrTime, bool>> read_action_bool(XrAction action);
@@ -256,9 +268,6 @@ public:
 
 		xrLocateSpace(space, reference, time, &location);
 
-		auto req_flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
-		if ((location.locationFlags & req_flags) != req_flags)
-			return {};
 
 		glm::vec3 position{
 		        location.pose.position.x,

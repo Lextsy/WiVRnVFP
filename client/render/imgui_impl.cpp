@@ -17,6 +17,7 @@
  */
 
 #include "imgui_impl.h"
+#include "android/jnipp.h"
 #include "implot.h"
 
 #include "application.h"
@@ -47,9 +48,11 @@
 #include <string_view>
 
 #ifdef __ANDROID__
+#if __ANDROID_API__ >= 29
 #include <android/font.h>
 #include <android/font_matcher.h>
 #include <android/system_fonts.h>
+#endif
 #else
 #include <fontconfig/fontconfig.h>
 #endif
@@ -211,7 +214,16 @@ imgui_textures::imgui_textures(
 
 imgui_textures::~imgui_textures()
 {
-	device.waitIdle();
+	// Destructors are implicitly noexcept: a vk::raii throw here aborts the
+	// process instead of unwinding.
+	try
+	{
+		device.waitIdle();
+	}
+	catch (const vk::SystemError & e)
+	{
+		spdlog::error("vkDeviceWaitIdle: {}", e.what());
+	}
 }
 
 std::vector<std::pair<ImVec2, float>> imgui_context::ray_plane_intersection(const imgui_context::controller_state & in) const
@@ -406,15 +418,16 @@ imgui_context::imgui_context(
 }
 
 #ifdef __ANDROID__
-static std::vector<std::string> find_font(std::u16string_view sample_text, const std::string & locale)
+static std::vector<std::string> find_font([[maybe_unused]] std::u16string_view sample_text, [[maybe_unused]] const std::string & locale)
 {
-	jni::jni_thread::setup_thread(nullptr);
+	jni::jni_thread::setup_thread();
 
-	int api_level = jni::klass("android/os/Build$VERSION").field<jni::Int>("SDK_INT");
+#if __ANDROID_API__ >= 29
+	int api_level = android_api_level();
 
-	if (api_level >= 26)
+	if (api_level >= 29)
 	{
-		// API 26+: Use AFontMatcher
+		// API 29+: Use AFontMatcher
 		AFontMatcher * font_matcher = AFontMatcher_create();
 		if (!font_matcher)
 			throw std::runtime_error("AFontMatcher_create");
@@ -444,13 +457,13 @@ static std::vector<std::string> find_font(std::u16string_view sample_text, const
 		return fonts;
 	}
 	else
+#endif
 	{
-		// API 25: Fall back to hard-coded default font paths
-		spdlog::warn("Using default fonts (API 25 does not have AFontMatcher)");
+		// Fall back to hard-coded default font paths
+		spdlog::warn("Using default fonts (AFontMatcher requires API 29)");
 		return {
-		        "/system/fonts/roboto-regular.ttf",
-		        "/system/fonts/roboto-bold.ttf"
-		};
+		        "/system/fonts/Roboto-Regular.ttf",
+		        "/system/fonts/Roboto-Bold.ttf"};
 	}
 }
 #else
@@ -1180,9 +1193,18 @@ imgui_context::~imgui_context()
 		fences.push_back(*f.fence);
 	}
 
-	// Wait for fences before ImGui_ImplVulkan_Shutdown is called
-	if (auto result = device.waitForFences(fences, true, 1'000'000'000); result != vk::Result::eSuccess)
-		spdlog::error("vkWaitForfences: {}", vk::to_string(result));
+	// Wait for fences before ImGui_ImplVulkan_Shutdown is called. This runs from
+	// a destructor, so the vk::raii throw on timeout has to be absorbed here.
+	try
+	{
+		vk::Result result = device.waitForFences(fences, true, 1'000'000'000);
+		if (result != vk::Result::eSuccess)
+			spdlog::error("vkWaitForfences: {}", vk::to_string(result));
+	}
+	catch (const vk::SystemError & e)
+	{
+		spdlog::error("vkWaitForfences: {}", e.what());
+	}
 
 	ImGui_ImplVulkan_Shutdown();
 	ImPlot::DestroyContext();

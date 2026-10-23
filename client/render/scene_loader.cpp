@@ -50,6 +50,7 @@
 #include <simdjson/dom/object.h>
 #include <simdjson/error.h>
 #include <spdlog/spdlog.h>
+#include <stdexcept>
 #include <string>
 #include <vulkan/vulkan_format_traits.hpp>
 
@@ -397,6 +398,11 @@ std::pair<size_t, std::vector<std::vector<std::byte>>> create_vertex_buffers(
 	}
 
 	// Allocate buffers
+	// std::ranges::max dereferences the result iterator; with an empty bindings
+	// vector (e.g. a shader whose SPIR-V failed to reflect, yielding no inputs)
+	// it returns the null begin iterator and crashes. Fail with a clear error.
+	if (layout.bindings.empty())
+		throw std::runtime_error("No vertex input bindings for shader (" + std::to_string(layout.attribute_names.size()) + " attributes)");
 	int max_binding = std::ranges::max(layout.bindings, {}, &vk::VertexInputBindingDescription::binding).binding;
 	buffers.resize(max_binding + 1);
 	for (const vk::VertexInputBindingDescription & binding: layout.bindings)

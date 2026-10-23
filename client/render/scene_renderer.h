@@ -29,6 +29,7 @@
 #include <glm/vec4.hpp>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_raii.hpp>
@@ -45,6 +46,13 @@ struct renderpass_info
 	bool keep_depth_buffer;
 	vk::SampleCountFlagBits msaa_samples = vk::SampleCountFlagBits::e1;
 	uint32_t multiview_count;
+	uint32_t view_count;
+	// false: the color attachment is loaded (compositing passes that draw on
+	// top of an image a previous pass already rendered into)
+	bool clear_color = true;
+	// false: the render pass has no depth attachment at all (GUI/overlay
+	// compositing passes): avoids the full-image depth clear and its tiles
+	bool depth_attachment = true;
 
 	bool operator==(const renderpass_info & other) const noexcept = default;
 };
@@ -117,21 +125,22 @@ class scene_renderer
 	// Destination images
 	struct output_image
 	{
-		vk::raii::Framebuffer framebuffer = nullptr;
-		vk::raii::ImageView image_view = nullptr;
+		// One render pass: multiview devices render every eye in a single pass, devices
+		// without VK_KHR_multiview get one pass and one framebuffer per eye.
+		std::vector<vk::raii::Framebuffer> framebuffers;
+		std::vector<vk::raii::ImageView> image_views;
+		std::vector<vk::raii::ImageView> depth_views;
+		std::vector<vk::raii::ImageView> multisample_views;
 
 		image_allocation depth_buffer;
-		vk::raii::ImageView depth_view = nullptr;
-
 		image_allocation multisample_image;
-		vk::raii::ImageView multisample_view = nullptr;
 	};
 
 	struct renderpass
 	{
 		vk::raii::RenderPass renderpass = nullptr;
 		vk::AttachmentReference color_attachment;
-		vk::AttachmentReference depth_attachment;
+		std::optional<vk::AttachmentReference> depth_attachment;
 		std::optional<vk::AttachmentReference> resolve_attachment;          // Only used if MSAA is enabled
 		std::optional<vk::AttachmentReference> fragment_density_attachment; // Only used if fragment density map is enabled
 		int attachment_count;
@@ -159,11 +168,21 @@ class scene_renderer
 
 	vk::raii::DescriptorSetLayout layout_0; // Descriptor set 0: per-frame/view data (UBO), per-instance data (UBO + SSBO), per-material data (5 combined image samplers and 1 uniform buffer)
 
+	// VK_KHR_push_descriptor support: devices without it bind regular descriptor sets
+	// allocated from descriptor_pool instead of pushing them.
+	bool push_descriptors;
+	vk::raii::DescriptorPool descriptor_pool = nullptr;
+
 	vk::raii::PipelineLayout pipeline_layout = nullptr;
 
 	// Texture samplers
 	std::unordered_map<renderer::sampler_info, std::shared_ptr<vk::raii::Sampler>> samplers;
 	vk::Sampler get_sampler(const renderer::sampler_info & info);
+
+	// GUI quad compositing: image views for the imgui canvases, and the set of
+	// canvas images already transitioned to SHADER_READ_ONLY_OPTIMAL this frame
+	std::unordered_map<VkImage, vk::raii::ImageView> gui_canvas_views;
+	std::unordered_set<VkImage> gui_canvases_read_only;
 
 	// Default material and textures
 	// This material has 1x1 textures with the following values:
@@ -229,12 +248,25 @@ private:
 
 		buffer_allocation debug_draw;
 
+		// Per-frame scratch vertex buffer for GUI quad compositing
+		buffer_allocation gui_quad;
+
+		// Descriptor sets allocated from descriptor_pool, reused across frames:
+		// each frame slot only touches its own sets, and start_frame waited on
+		// this slot's fence, so the GPU finished with them frames_in_flight ago
+		std::vector<vk::raii::DescriptorSet> descriptor_sets;
+		size_t descriptor_sets_used = 0;
+		// Scene-graph transforms are recomputed on the first render() of each
+		// frame; later passes (overlay, GUI) reuse them
+		bool nodes_dirty = true;
+
 		// Statistics
 		stats frame_stats;
 	};
 
 	std::vector<per_frame_resources> frame_resources;
 	int current_frame_index;
+	uint64_t frame_stamp = 0;
 	vk::raii::QueryPool query_pool = nullptr;
 	double gpu_time_s = 0;
 
@@ -255,7 +287,7 @@ public:
 	        vk::raii::PhysicalDevice physical_device,
 	        thread_safe<vk::raii::Queue> & queue,
 	        uint32_t queue_family_index,
-	        int frames_in_flight = 2);
+	        int frames_in_flight = 3);
 
 	~scene_renderer();
 
@@ -276,8 +308,32 @@ public:
 	        vk::Image color_buffer,
 	        vk::Image depth_buffer,
 	        std::span<frame_info> info,
-	        bool render_debug_draws = false);
+	        bool render_debug_draws = false,
+	        bool clear_color_attachment = true);
 	void end_frame();
+
+	// One imgui window: a sub-rectangle of the imgui canvas mapped onto a
+	// world-space quad. Used to composite the GUI into the projection image
+	// when the runtime has no quad layer support (Wave shim).
+	struct gui_quad
+	{
+		vk::Image canvas;
+		vk::Rect2D src_rect; // pixels inside the canvas
+		glm::mat4 model;     // translate * rotation * scale(size)
+	};
+
+	// Draw the quads on top of color_buffer (blended, no depth test). The
+	// image must currently be in color_layout; it ends in
+	// COLOR_ATTACHMENT_OPTIMAL.
+	void render_gui(
+	        std::span<const gui_quad> quads,
+	        vk::Extent2D output_size,
+	        vk::Format color_format,
+	        vk::Format depth_format,
+	        vk::Image color_buffer,
+	        vk::ImageLayout color_layout,
+	        vk::Extent2D canvas_size,
+	        std::span<frame_info> frames);
 
 	void debug_draw_clear();
 	// void debug_draw(std::span<glm::vec3> line, glm::vec4 color);

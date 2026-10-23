@@ -40,6 +40,7 @@
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
 #include <algorithm>
+#include <chrono>
 #include <mutex>
 #include <ranges>
 #include <thread>
@@ -891,9 +892,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			});
 		}
 	}
-
 	session.begin_frame();
-
 	std::array<int, view_count> image_indices;
 
 #if WIVRN_FEATURE_RENDERDOC
@@ -929,10 +928,24 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 
 		blit_handle->feedback.blitted = instance.now();
-		if (blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
+		XrTime frame_age = blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder;
+		if (frame_age > 1'000'000'000)
+		{
+			spdlog::warn("Stream stalled: decoded frame {} ms old at blit", frame_age / 1'000'000);
 			set_state(state::stalled);
+		}
 		++blit_handle->feedback.times_displayed;
 		blit_handle->feedback.displayed = frame_state.predictedDisplayTime;
+
+		// Throttled proof that decoded video reaches the eye swapchains, carrying
+		// the same age the stall guard above measures against. 60 blits is one log
+		// per second at the rates this device sustains.
+		if (blit_counter++ % 60 == 0)
+		        spdlog::info(
+		                "Stream blit #{} age={:.1f}ms display_time={}",
+		                blit_counter,
+		                double(frame_age) / 1e6,
+		                frame_state.predictedDisplayTime);
 
 		use_alpha = blit_handle->view_info.alpha;
 
@@ -1023,10 +1036,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	}
 
 	// Allow the headset to time warp if we are redisplaying a frame
-	if ((not application::get_hmd_traits().discard_frame) or
-	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
-	    is_gui_interactable())
+	const bool any_blit = std::ranges::any_of(current_blit_handles, [](const auto & h) { return bool(h); });
+	const bool gate_reprojection = any_blit and
+	                                ((not application::get_hmd_traits().discard_frame) or
+	                                 std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
+	                                 is_gui_interactable());
+	if (gate_reprojection)
 	{
+		// No submission this iteration: the query pool has no fresh results.
+		query_pool_filled = false;
 		XrExtent2Di extents[view_count];
 		{
 			int32_t max_width = 0;
@@ -1065,7 +1083,6 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		assert(swapchain);
 		// defoveate the image, apply scale/bias
 		int image_index = swapchain.acquire();
-		swapchain.wait();
 
 		switch (gui_status)
 		{
@@ -1160,6 +1177,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		device.resetFences(*fence);
 		queue.lock()->submit(submit_info, *fence);
+		// The submitted command buffer resets and writes the timestamp query pool;
+		// only now may the next iteration call getResults with eWait. Marking it
+		// filled without submitting parks vkGetQueryPoolResults on queries the GPU
+		// never writes (measured 5.1 s stall on Adreno 540).
+		query_pool_filled = true;
 #if WIVRN_FEATURE_RENDERDOC
 		renderdoc_end(*vk_instance);
 #endif
@@ -1196,6 +1218,27 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        use_alpha ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0,
 		        application::space(xr::spaces::world),
 		        layer_view);
+
+#if WIVRN_WAVE_RUNTIME
+		// The defoveator rendered the video into this image (final layout:
+		// color attachment); draw_gui composites the GUI and the controller
+		// rays into it below.
+		{
+			std::array<XrView, 2> wave_views;
+			for (uint32_t view = 0; view < view_count; ++view)
+				wave_views[view] = XrView{
+				        .type = XR_TYPE_VIEW,
+				        .pose = pose[view],
+				        .fov = fov[view],
+				};
+			set_wave_target(
+			        swapchain.image(image_index),
+			        vk::ImageLayout::eColorAttachmentOptimal,
+			        vk::Extent2D{(uint32_t)swapchain.width(), (uint32_t)swapchain.height()},
+			        application::space(xr::spaces::world),
+			        {wave_views.data(), view_count});
+		}
+#endif
 
 		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
 		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)
@@ -1276,7 +1319,6 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
-	query_pool_filled = true;
 }
 
 void scenes::stream::exit()
@@ -1310,7 +1352,12 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 {
 	assert(swapchain_width);
 	assert(swapchain_height);
-	device.waitIdle();
+	// vkDeviceWaitIdle blocks until every queue drains. The decoder threads keep
+	// the device busy for as long as the stream runs, so a device-wide idle here
+	// parks the render thread for seconds (measured 5.5s on Adreno 540) and the
+	// 1s stall guard fires. Only the reprojection swapchain's own images need to
+	// be quiescent: they are touched exclusively by the graphics queue.
+	queue.lock()->waitIdle();
 	spdlog::info("swapchain setup, refresh rate {}", video_stream_description->refresh_rate);
 	session.set_refresh_rate(video_stream_description->refresh_rate);
 
